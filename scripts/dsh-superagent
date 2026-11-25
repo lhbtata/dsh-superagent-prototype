@@ -26,6 +26,10 @@ ARTIFACTS = ROOT / '.artifacts'
 CONTROL = ARTIFACTS / 'control'
 KEEP_LOGS = 20
 
+# Process names the DSH service may report. Node.js renames its main thread, so some hosts list the
+# service as "MainThread" instead of "node"; the arguments identify it in that case (see `dsh_service`).
+PROCESS_NAMES = ('node', 'dsh')
+
 
 def control(profile):
     """Return the control directory for `profile`, creating it if needed."""
@@ -63,14 +67,27 @@ def ps(*options, check=False):
             yield int(parts[0]), parts[1], parts[2].split()
 
 
+def dsh_service(name, args):
+    """Return whether a process looks like the DSH service.
+
+    The process name alone is unreliable: Node.js renames its main thread, so hosts report the
+    service as "MainThread". The DSH entry point in the arguments identifies it as well, but only
+    when it is the program itself or the script behind the interpreter, so that a launcher's own
+    command line (the tmux server, a shell) is not mistaken for the service.
+    """
+    if name in PROCESS_NAMES:
+        return True
+    return any(os.path.basename(word) in ('dsh', 'dsh.js') for word in (args or [])[:2])
+
+
 def running(pid, profile):
     """Return whether `pid` is currently running the DSH service for `profile` (`ps -p` returns nothing once exited)."""
-    return any(found == pid and name in ('node', 'dsh') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
+    return any(found == pid and dsh_service(name, args) and serves(args, profile) for found, name, args in ps('-p', str(pid)))
 
 
 def processes(profile):
     """Return PIDs of all running DSH service processes for `profile`, including instances started outside this script and the recorded `service.pid` while still running."""
-    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh') and serves(args, profile)]
+    found = [pid for pid, name, args in ps('-ax', check=True) if dsh_service(name, args) and serves(args, profile)]
     try:
         pid = int((control(profile) / 'service.pid').read_text())
     except (OSError, ValueError):
