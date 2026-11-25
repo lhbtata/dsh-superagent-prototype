@@ -9,7 +9,8 @@
 
 | 组件 | 位置 |
 |---|---|
-| 官方仓库克隆 | `/home/ps/src/dsh-superagent-prototype`（含未提交的本地补丁，见 §5） |
+| 官方仓库克隆 | `/home/ps/src/dsh-superagent-prototype`（origin=上游 deepseek-ai，本机 fork 远端 `fork`=lhbtata/dsh-superagent-prototype；本地 main 已与 fork/main 同步） |
+| 本机 fork | `lhbtata/dsh-superagent-prototype`（上游关闭了 issue 与 PR，改动落在 fork：脚本修复 PR #1、本文件 PR #2，均已并入 fork/main） |
 | 靶场仓库（GitHub） | `lhbtata-superagent/superagent-sandbox`（公开，agent 账号自持） |
 | 靶场本地克隆 | `/home/ps/src/superagent-sandbox`（executor prepare 的 fetch 基础） |
 | DSH profile | `~/.dsh/profiles/superagent`（机器配置在其 `cordis.patch.yml`） |
@@ -74,7 +75,7 @@
 
 `scripts/dsh-superagent` 的**服务进程识别**已改写（2026-11-25）。上游用 `name in ('node','dsh')` 匹配 `ps` 的进程名，而本机 `ps -o ucomm=` 对 node 进程报告 `MainThread`（Node.js 改名主线程所致，`comm` 同样是 `MainThread`），于是上游过滤永远不命中，`status`/`stop` 判定「服务没在跑」——`restart` 因此不可靠，组件级残留错误（如 `health.worker=error`）就清不掉。
 
-改法（已提交到本机 fork `lhbtata/dsh-superagent-prototype` 的分支 `fix/superagent-service-process-detection`）：
+改法（已并入本机 fork `lhbtata/dsh-superagent-prototype` 的 `main`，PR #1 `fix/superagent-service-process-detection`；本地工作区已同步）：
 
 ```python
 PROCESS_NAMES = ('node', 'dsh')
@@ -141,6 +142,9 @@ def dsh_service(name, args):
 7. 人工合并 PR #2（merged_at 2026-11-25T08:30:39Z，merge commit `fcbe0a8`）后，superagent 自己把工单收尾：`ended {by: "executor", outcome: "merged"}`，关联线程 `github:2` 记 `closed{outcome: merged}` —— 闭环由系统自动确认，无需手工关单。
 8. 合并瞬间 worker 会话收尾抛 AggregateError → `health.worker=error`（见 §2 的处理办法：restart）。
 9. **第二次试跑（重启后，可重复性验证）**：Issue #3「README 第二行『靶场』改为『沙箱』」→ Ticket `4f67c070` → PR #4，分支 `agent/readme-sandbox-wording-4f67c0700b90`，基线是已合并的 `fcbe0a8`，diff 仅一行（`-…靶场…` / `+…沙箱…`），commit 署名 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`。说明「一个仓库、持续接需求」可重复工作。
+
+10. 人工合并 PR #4（merged_at 2026-11-25T08:47:12Z）→ 工单同样自动收尾（`ended{outcome: merged}`），工单列表随即为空；合并瞬间又出现一次同样的 AggregateError 残留（08:47:25Z），`restart` 后 `status` 回到 exit=0、health 十项全 ready。两次合并的表现一致：残留错误只影响面板与退出码，不影响已合并的结果。
+11. **脚本修复的实效**：`scripts/dsh-superagent` 的进程识别修复（§5）落地后，`status` 只报服务进程（`pids` 1 个）、`exit=0`，`restart` 能可靠停掉旧进程并起新进程（本次新 pid `3872932`）——修复前 `stop`/`restart` 会判「服务没在跑」，上面第 8、10 条的残留错误就清不掉。
 
 ## 8. 升级流程
 
