@@ -317,7 +317,7 @@ python3 scripts/dsh-superagent restart --profile superagent
   ~/.local/bin/lark-bot im +chat-members-list --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --member-types user,bot --as bot
   ```
 - 诊断期建的 3 个临时仓库（`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125`）**已全部删除**（API 返回 404 确认），无需再清理。
-- 尚待人工处理：**① PR #3（迁移后验收单）待操作者合并；② 旧仓库 `lhbtata-superagent/superagent-sandbox` 处置待拍板（删除 / 转 private / 归档）。** 其余（飞书权限、应用改名、通道验收）已于 2026-11-26 完成。此处的待办仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
+- 尚待人工处理：**① PR #3（迁移后验收单）待操作者合并；② 旧仓库 `lhbtata-superagent/superagent-sandbox` 已转 private（见 §11.5），是否彻底删除待拍板（需 `gh auth refresh -s delete_repo` 且设备码必须登录 agent 账号）。** 其余（飞书权限、应用改名、通道验收）已于 2026-11-26 完成。此处的待办仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
 
 ## 11. 仓库归属切换（2026-11-26）
 
@@ -386,4 +386,21 @@ python3 scripts/dsh-superagent restart --profile superagent
 - 操作者在 `lhbtata/superagent-sandbox` 发 Issue #2「试跑3：README 第二行末尾补句号」，正文 @`lhbtata-superagent` → 约 60s 内成单（Ticket `99af264927220e1a1513aea79ff80c0b`，strength=explicit）。
 - agent 提交 **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号；commit author/committer 均为 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`。
 - collaborator 权限核对：`lhbtata-superagent` = push ✅ / admin ❌；PR #3 `merged=false, merged_by=null` —— **agent 不能自己合并，需操作者审阅合并**，符合 §11.1 的哲学。
+
+### 11.5 旧仓库退役：先转 private，再谈删除（2026-11-26）
+
+旧仓库 `lhbtata-superagent/superagent-sandbox`（切换前 agent 自持、public、agent 有 admin）保留为历史归档。**处置原则：先转 private，再决定删不删。**
+
+- 理由：删除要 `gh auth refresh -h github.com -s delete_repo` 走浏览器设备码，**授权期间仓库仍是 public 暴露着**，而且 agent 在那儿有 admin、能自合 PR。转 private 严格更安全且可逆。
+- 转 private（用 agent 自己的 token，agent 是 owner）：
+
+  ```sh
+  gh-agent api -X PATCH repos/lhbtata-superagent/superagent-sandbox -F private=true
+  # → {"full_name":"lhbtata-superagent/superagent-sandbox","private":true,"visibility":"private"}
+  ```
+
+  注意：**操作者 `lhbtata` 对该仓库只有 pull**，没有 admin，所以 `gh api -X PATCH …` 会 404（私有化后操作者视角直接 404，属预期）。
+- 转 private 后顺手把遗留 Issue #1、#3 关掉（`gh-agent api -X PATCH repos/…/issues/<n> -f state=closed -f body='迁移收尾：…'`），旧仓库现在 4 个 Issue/PR 全 closed。
+- 归档内容核对：README.md（79 字节）+ PR #2/#4（均 merged）。有价值的内容都已并入新仓库 `lhbtata/superagent-sandbox`。
+- **删除仍需用户拍板**：要删的话得给 agent 账号补 `delete_repo` scope，且浏览器设备码授权时必须登录 **`lhbtata-superagent`**（上次给 `lhbtata` 授权导致 `error refreshing credentials for lhbtata, received credentials for lhbtata-superagent, did you use the correct account in the browser?`）。
 
