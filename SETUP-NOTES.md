@@ -161,10 +161,12 @@ plugins:
 ### 5.8 policy 里的接收名单（按应用级 open_id）
 
 - feishu 源允许写 `{"id":"ou_…","name":"…"}`（`src/sources/feishu.ts:73`），**github 源不允许带 `name`**（strict schema，`src/sources/github.ts:72`），带了就报 `Unrecognized key: "name"`。
-- 本机已写：`sources.feishu.allowed = [{"id":"ou_301ab27830ae4e1d02dd77873e1afc9c","name":"刘海宾"}]`（这是刘海宾在**本应用**下的 open_id，与个人应用里的 open_id 不同）。
+- 本机采用**显式白名单**：`sources.feishu.allowed = [{"id":"ou_301ab27830ae4e1d02dd77873e1afc9c","name":"刘海宾"}]`（这是刘海宾在**本应用**下的 open_id，与个人应用里的 open_id 不同）。**只有名单里的人能发需求**；群里其他人即使 @ 机器人，决策 reason 会是 `not_a_member`（`src/policy.ts:210`），不建单、不执行。
 - **写整块 policy 时必须带完整的 `rules` 原样回填**：`rules[]` 的 schema 是 `{id, name, enabled, instruction}`，写 `kind` 会被拒（`Unrecognized key: "kind"`），漏字段也会被拒（`rules.0.id: expected string, received undefined`）。最稳的做法是 GET 一次 `settings`，把 `blocks.policy.value` 原样取出、只改 `sources` 里要动的字段再 PUT 回去。
-- **syncChat（名单自动同步）**：给 feishu 源填 `syncChat` = 群 chat_id，名单就会跟着群成员走（新成员进、离开的移除、名字取群里的名字），在启动时和点「立即同步」时执行。本机已配 `syncChat: "oc_167db7fc1fc970bcf8716e2616f1a3a6"`，`POST /orchestrator/api/policy-sync/feishu` 返回 `{"policy":{"allowed":[{"id":"ou_301ab…","name":"刘海宾"}],"syncChat":"oc_…","admission":{}}}`。
-  - 没填 `syncChat` 时调该接口会报 `nothingToSync`（`The feishu Source's part of the Policy has nothing to sync from`）。
+- **syncChat（名单自动同步，可选，本机未启用）**：给 feishu 源填 `syncChat` = 群 chat_id，名单就会跟着群成员走（新成员进、离开的移除、名字取群里的名字），在启动时和点「立即同步」时执行；`POST /orchestrator/api/policy-sync/feishu` 会返回同步结果 `{"policy":{"allowed":[…],"syncChat":"oc_…","admission":{}}}`。
+  - **风险**：一旦启用，**任何进入该群的人都自动获得发需求并驱动 agent 改仓库的资格**——只要 ta @ 机器人，决策不再是 `not_a_member`，而是当作获授权的需求处理。这与本机「只允许本人发起」的原则冲突，因此**本机保持 `syncChat` 为空**，用显式白名单。
+  - 没填 `syncChat` 时调该接口会报 `nothingToSync`（`The feishu Source's part of the Policy has nothing to sync from`）——这是预期行为，不是故障。
+  - 若将来确需开启，步骤：policy 里给 feishu 填 `syncChat` → `POST /orchestrator/api/policy-sync/feishu` → 复核 `allowed` 名单 → 并在本节同步写明「群成员自动获得需求资格」这一变化。
 
 ### 5.9 重启并验收
 
@@ -187,6 +189,7 @@ python3 scripts/dsh-superagent restart --profile superagent   # 插件需重启�
 | 直答不建单 | 自我介绍/闲聊类请求 → 决策 outcome=ignore、reason code=`said` | 预期行为：直接在原会话作答，不开工单 |
 | 应用改名 | 改名后 `setup.accounts.feishu.name` 仍是旧名 | 需 `restart`（重存 source 块不刷新缓存的 bot 名） |
 | `im:chat.group_info:readonly` 不存在 | 开发者后台搜不到这个权限 | 见 §5.11：群信息由 `im:chat` / `im:chat:readonly` 覆盖，不单独申请 |
+| syncChat 与白名单语义冲突 | 填了 `syncChat` 后群里任何新成员都自动获得发需求资格 | 本机**不启用** syncChat，用显式白名单（只含本人 open_id），见 §5.8 |
 
 ### 5.11 权限清单（2026-11-26 实际申请并验证）
 
@@ -310,4 +313,4 @@ python3 scripts/dsh-superagent restart --profile superagent
   ~/.local/bin/lark-bot im +chat-members-list --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --member-types user,bot --as bot
   ```
 - 诊断期建的 3 个临时仓库（`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125`）**已全部删除**（API 返回 404 确认），无需再清理。
-- 尚待人工处理：**无**（2026-11-26 起，飞书权限已申请并发布，应用已改名「Super-agent」，通道已验收通过）。
+- 尚待人工处理：**无**（2026-11-26 起，飞书权限已申请并发布，应用已改名「Super-agent」，通道已验收通过）。此处的「无」仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
