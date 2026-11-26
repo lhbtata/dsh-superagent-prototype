@@ -317,7 +317,7 @@ python3 scripts/dsh-superagent restart --profile superagent
   ~/.local/bin/lark-bot im +chat-members-list --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --member-types user,bot --as bot
   ```
 - 诊断期建的 3 个临时仓库（`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125`）**已全部删除**（API 返回 404 确认），无需再清理。
-- 尚待人工处理：**① PR #3（迁移后验收单）待操作者合并；② 旧仓库 `lhbtata-superagent/superagent-sandbox` 已转 private（见 §11.5），是否彻底删除待拍板（需 `gh auth refresh -s delete_repo` 且设备码必须登录 agent 账号）。** 其余（飞书权限、应用改名、通道验收）已于 2026-11-26 完成。此处的待办仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
+- 尚待人工处理：**① 给 `main` 配 branch protection（要求至少 1 个 approval、禁 direct/force push）—— 需仓库 admin 在 GitHub 网页操作，因为 write 权限就能合并 PR，agent 其实能自合（§11.6）；② 接收名单需按 §5.8 白名单口径手工维护（新增需求人手动加 open_id，`syncChat` 保持关闭）。** 其余（飞书权限、应用改名、通道验收、仓库归属切换、PR #3 合并、旧仓库退役删除）已于 2026-11-26 全部完成。此处的待办仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事。
 
 ## 11. 仓库归属切换（2026-11-26）
 
@@ -418,5 +418,7 @@ python3 scripts/dsh-superagent restart --profile superagent
   ```
 
   未补 scope 时 DELETE 会返回 GitHub 原生 403 `Must have admin rights to Repository.`（本机 2026-11-26 实测）。设备码授权时若登错账号会报 `error refreshing credentials for lhbtata, received credentials for lhbtata-superagent, did you use the correct account in the browser?` —— 上次就是这样失败的。
+- **删除已于 2026-11-26 完成**：`gh-agent auth refresh -s delete_repo` 授权成功（token scopes 变为 `delete_repo,gist,read:org,repo`）→ `DELETE` 无返回体（成功）→ 复核 `GET repos/lhbtata-superagent/superagent-sandbox` 返回 **404 Not Found**；agent 账号下已无任何仓库。删除的是纯归档（README + 已合并 PR），有价值内容都已并入新仓库。
+- 设备码机制的坑：`gh auth refresh` 的等待进程有超时（约几分钟），超时后进程带 `context deadline exceeded` 退出、**码随之作废**，必须重新出码；码由 CLI 打印并自动复制到剪贴板，浏览器端只需填码 + 确认 scope，**没有「选择 OAuth App」这一步**。
 
 
