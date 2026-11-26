@@ -422,3 +422,46 @@ python3 scripts/dsh-superagent restart --profile superagent
 - 设备码机制的坑：`gh auth refresh` 的等待进程有超时（约几分钟），超时后进程带 `context deadline exceeded` 退出、**码随之作废**，必须重新出码；码由 CLI 打印并自动复制到剪贴板，浏览器端只需填码 + 确认 scope，**没有「选择 OAuth App」这一步**。
 
 
+## 12. 合并权约束：Free + private 下能做什么（2026-11-26）
+
+### 12.1 结论先说
+
+GitHub 上 **write(push) 权限即可合并 PR**（PR #3 的 `merged_by=lhbtata-superagent` 即实证：它只有 push、没有 admin）。而 agent 账号**必须**对目标仓库有 write —— 原型源码 `src/sources/github-pull.ts` 的 `agentPull()` 要求 PR 的 head 仓库等于配置仓库（注释原文 "not a fork"），fork PR 会被 `claimPull` 拒绝（"PR does not belong to this ticket"）。同时 PR 创建者必须等于 `deployment.github.login`（agent 账号），否则 `src/sources/github.ts:227` 的 `sameName(item.user.login, login)` 会把用户自己发的 Issue 全部跳过。
+
+→ **在 private + Free 计划下，无法从权限层面根除「agent 能自合」。** 唯一结构性解法是 branch protection（required pull request + 1 approval + no bypass + enforce admins），而本机实测：
+
+```
+GET /repos/lhbtata/superagent-sandbox/branches/main/protection → 403
+GET /repos/lhbtata/superagent-sandbox/rulesets                → 403
+{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}
+```
+
+用户明确决定：**不转 public、不付费**（2026-11-26）。因此采用「收窄权限 + 侦测告警」的折中方案。
+
+### 12.2 已做：收窄 agent 凭据
+
+- 删旧仓库时临时补的 `delete_repo` scope 已撤销。撤销方式是**重新登录**（`gh auth refresh` 只会把 scope 往并集里加、不会减）：
+
+  ```sh
+  gh-agent auth login --web --hostname github.com --git-protocol https --scopes repo,read:org,gist
+  ```
+
+  → token scopes 变为 `gist, read:org, repo`；`DELETE /repos/…` 复测回到 403 `Must have admin rights to Repository.`；push / PR / 通知读取能力不受影响；服务 health 12 项仍全 ready。
+- agent 账号当前**只能看到 1 个仓库**（靶场 sandbox，push 角色），爆炸半径已经很小。
+
+### 12.3 已做：自合并侦测护栏（每 30 分钟 → 飞书）
+
+- 脚本：`/home/ps/.local/bin/superagent-selfmerge-watch`（python3，chmod 755）
+  - 用**操作者**账号的 `gh` 拉 `repos/lhbtata/superagent-sandbox/pulls?state=closed`，对每个已合并 PR 再取详情，读 `merged_by.login`，筛出 `== lhbtata-superagent` 的。
+  - 已告警记录（`number:merged_at`）存 `/home/ps/.local/state/superagent/selfmerge-alerted.json`；**首次运行只建基线不发告警**（避免把历史 PR #3 当成新事件）。
+  - 新增项由脚本自己用 **Super-agent bot**（`/home/ps/.local/bin/lark-bot im +messages-send --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --markdown … --as bot --idempotency-key …`）发到群「dsh-agent组1」，文案里注明「若是你本人用 agent 账号登录态点的合并属预期」。
+- 定时任务：`schedule-1f91ec15-104f-44d4-88c0-50a363cd1b33`（rrule `FREQ=MINUTELY;INTERVAL=30`，target `new_once`，会话 `session-4cbb14e5-4022-4c7a-bbcb-ed4e76ec9de4`）—— 每 30 分钟在新会话里跑一次脚本。
+- 手工查一次：`/home/ps/.local/bin/superagent-selfmerge-watch`，输出 `baseline …` / `no_new …` / `alerted N 条 …` / `ERROR …`。
+
+### 12.4 待办：Policy 明规则
+
+在面板 Policy 的 rules 里显式加一条：**禁止自行合并 PR，所有 PR 一律交操作者合并**。现状是「交付配置未指定合并 CLI → 未开启自动合并」，属于「恰好没工具」，不是策略明令。
+
+### 12.5 人工纪律
+
+合并 PR 时**用 `lhbtata` 账号的浏览器会话**操作，避免 `merged_by` 被记成 agent 账号混淆审计（PR #3 就是这么产生的）。
