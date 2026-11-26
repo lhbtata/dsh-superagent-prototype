@@ -54,8 +54,8 @@
 - 仓库归属：**靶场仓库在操作者账号 `lhbtata` 名下（私有）**，agent 账号 `lhbtata-superagent` 作为 **collaborator（push，无 admin）** 参与。
   - 这是官方推荐形态：`SETUP.md` 第 2 问指定 owner/name 仓库、第 3 问要求「专用账号，绝不用操作者本人账号」，第 67 行的 operator steps 包含「以 agent 账号接受仓库邀请」；`docs/006-deployment.md` 也写明「给 agent 建一个 GitHub 用户账号并授予该仓库写权限」。
   - 2026-11-26 已从旧形态（仓库在 agent 账号名下、公开）切过来：`gh api -X PUT repos/lhbtata/superagent-sandbox/collaborators/lhbtata-superagent -f permission=push` → 201（invitation 346440054），再由 agent 账号 `gh-agent api -X PATCH user/repository_invitations/346440054` 接受。
-  - 好处：agent 账号**没有 admin**，不能自行合并自己的 PR（auto-merge 默认 No、由人合并）。旧形态下 agent 自持仓库有 admin，实测它把自己的 PR #2/#4 都自己合了，违反哲学。
-  - 旧仓库 `lhbtata-superagent/superagent-sandbox`（public、agent 自持）是切换前的遗留，处置见 §11。
+  - 好处：agent 账号**没有 admin**，不能改仓库设置（成员、可见性、分支保护、删仓库）。⚠️ 但**它仍然能合并自己的 PR** —— GitHub 上 write(push) 权限即可合并，admin 不是前提（PR #3 实测 `merged_by = lhbtata-superagent`）。旧形态下 agent 自持仓库有 admin，能自改设置、更危险。要真正做到「必须人合并」请给 main 开分支保护（§11.6）。
+  - 旧仓库 `lhbtata-superagent/superagent-sandbox`（已转 private、agent 自持）是切换前的遗留，处置见 §11.5 / §11.7。
 - `gh-agent` 与操作者的 `gh` 凭据目录完全独立（`~/.config/gh-agent` 与 `~/.config/gh`）。
 - worker 的 git 凭据走 stateDir 下自动生成的 `worker-gitconfig`（credential helper 指向 `gh-agent`，SSH 强制转 HTTPS），与操作者本机 git 配置隔离。
 - 换 agent 账号时只需：`GH_CONFIG_DIR=~/.config/gh-agent gh auth login`，然后面板 Sources 重存一次触发 setup 重校验。
@@ -287,7 +287,7 @@ def dsh_service(name, args):
 
 12. **飞书通道验收（2026-11-25 17:33）**：在「dsh-agent组1」群里发 `@Super-agent 介绍一下自己`（当时应用还叫「刘海宾的飞书 CLI」，2026-11-26 改名）→ bot 在**会话线程**内回帖成功（`outbox` 记录 `status: "sent"`，线程 `omt_186323b398ce5ca7` 内用户 17:33 + bot 17:38 两条）。走的是直答路径：不建工单（决策 outcome=ignore、reason code=`said`），符合「不涉及仓库改动就只在会话里回答」的策略。库里链路完整：trigger 3 条（1 条入群系统消息 + 2 条 mention）→ decision 4 条（先 `not_a_member`×2，写 allowed 后 requeue → `said`×2，strength inferred→explicit）→ thread 6 个（github:1-4 + feishu 三条）。
 13. **诊断期临时仓库已全部删除**：`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125` 经 API 返回 404（确认已删），操作者与 agent 账号下均无残留。
-14. **仓库归属切换后的第三次试跑（2026-11-26）**：仓库改为操作者名下 `lhbtata/superagent-sandbox`（agent 作 collaborator，push 无 admin）→ Issue #2「试跑3：README 第二行末尾补句号」→ Ticket `99af264927220e1a1513aea79ff80c0b` → **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号，commit 署名 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`；PR `merged=false / merged_by=null` —— agent 这次**没有 admin，无法自合**，必须由操作者合并。切换过程中的 404 故障与处理见 §11.3。
+14. **仓库归属切换后的第三次试跑（2026-11-26）**：仓库改为操作者名下 `lhbtata/superagent-sandbox`（agent 作 collaborator，push 无 admin）→ Issue #2「试跑3：README 第二行末尾补句号」→ Ticket `99af264927220e1a1513aea79ff80c0b` → **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号，commit 署名 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`；PR 于 2026-11-26T07:48:26Z 合并（merge commit `b791e85`），工单随即自动收尾 `ended{outcome: merged}`。⚠️ 注意：**write 权限就能合并 PR**，agent 其实能自合 —— 详见 §11.6 的更正与分支保护建议。切换过程中的 404 故障与处理见 §11.3。
 
 ## 9. 升级流程
 
@@ -385,9 +385,17 @@ python3 scripts/dsh-superagent restart --profile superagent
 
 - 操作者在 `lhbtata/superagent-sandbox` 发 Issue #2「试跑3：README 第二行末尾补句号」，正文 @`lhbtata-superagent` → 约 60s 内成单（Ticket `99af264927220e1a1513aea79ff80c0b`，strength=explicit）。
 - agent 提交 **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号；commit author/committer 均为 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`。
-- collaborator 权限核对：`lhbtata-superagent` = push ✅ / admin ❌；PR #3 `merged=false, merged_by=null` —— **agent 不能自己合并，需操作者审阅合并**，符合 §11.1 的哲学。
+- collaborator 权限核对：`lhbtata-superagent` = push ✅ / admin ❌。
+- **PR #3 于 2026-11-26T07:48:26Z 被合并**（merge commit `b791e85`），README 第二行变为「Super-agent 研究原型靶场仓库（agent 专用）。」；superagent 随即自动收尾：`ended {by:"executor", outcome:"merged"}`，关联线程 `github:3` 记 `closed{outcome: merged}`。合并后又按 §2 跑了一次 `restart` 清 worker 残留，health 12 项全 ready、`errors: {}`。
 
-### 11.5 旧仓库退役：先转 private，再谈删除（2026-11-26）
+### 11.6 重要更正：**write 权限就能合并 PR**
+
+- 本文档早期写过「agent 没有 admin，所以不能自己合并 PR」——**这个说法是错的**，实测已推翻：PR #3 的 `merged_by` 是 **`lhbtata-superagent`**（timeline 的 `merged`/`closed` 事件 actor 同为它，merge commit 的 author 名也是它）。GitHub 上**只要对仓库有 write（push）权限就能点合并**，admin 不是合并的前提；「无 admin 不可合并」只在开了分支保护/强制评审时才成立。
+- 含义：现在 agent 账号有 push 权限，**它自己提的 PR 自己也能合**。要真正落实「人合并」（官方哲学里 auto-merge 默认 No），得靠仓库侧的保护规则，而不是靠权限等级。
+- 建议（未执行，需在 GitHub 网页 Settings → Branches 配）：给 `main` 加一条 **branch protection rule** —— 要求至少 1 个 approval、禁止 direct push、禁止 force push，并**取消 agent 账号的直接 push 许可**（GitHub 无法直接禁止某个协作者 push，只能靠 required reviews + 阻止 bypass；agent 自己的 PR 因「不能批准自己的 PR」规则而无法满足 approval 条件，于是合不了）。
+- 顺带结论：**「人合并」在配置层面不可靠时，最强约束是让 agent 账号只有 push、并且给 main 开分支保护**。
+
+### 11.7 旧仓库退役：先转 private，再谈删除（2026-11-26）
 
 旧仓库 `lhbtata-superagent/superagent-sandbox`（切换前 agent 自持、public、agent 有 admin）保留为历史归档。**处置原则：先转 private，再决定删不删。**
 
@@ -402,5 +410,13 @@ python3 scripts/dsh-superagent restart --profile superagent
   注意：**操作者 `lhbtata` 对该仓库只有 pull**，没有 admin，所以 `gh api -X PATCH …` 会 404（私有化后操作者视角直接 404，属预期）。
 - 转 private 后顺手把遗留 Issue #1、#3 关掉（`gh-agent api -X PATCH repos/…/issues/<n> -f state=closed -f body='迁移收尾：…'`），旧仓库现在 4 个 Issue/PR 全 closed。
 - 归档内容核对：README.md（79 字节）+ PR #2/#4（均 merged）。有价值的内容都已并入新仓库 `lhbtata/superagent-sandbox`。
-- **删除仍需用户拍板**：要删的话得给 agent 账号补 `delete_repo` scope，且浏览器设备码授权时必须登录 **`lhbtata-superagent`**（上次给 `lhbtata` 授权导致 `error refreshing credentials for lhbtata, received credentials for lhbtata-superagent, did you use the correct account in the browser?`）。
+- **删除步骤**：给 agent 账号补 scope 后再删 ——
+
+  ```sh
+  gh-agent auth refresh -h github.com -s delete_repo     # 设备码：浏览器须登录 lhbtata-superagent
+  gh-agent api -X DELETE repos/lhbtata-superagent/superagent-sandbox
+  ```
+
+  未补 scope 时 DELETE 会返回 GitHub 原生 403 `Must have admin rights to Repository.`（本机 2026-11-26 实测）。设备码授权时若登错账号会报 `error refreshing credentials for lhbtata, received credentials for lhbtata-superagent, did you use the correct account in the browser?` —— 上次就是这样失败的。
+
 
