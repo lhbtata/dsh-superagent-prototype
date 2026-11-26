@@ -360,6 +360,26 @@ python3 scripts/dsh-superagent restart --profile superagent
   ```
 
   退订后下一轮即恢复 `ready`（`0 notifications; next poll ≥ 60s`）。同法可清 `github-cursor:*` / `github-ci:*` 残留（留在 DB 里无害，只是同号 Issue 会被当作已读过）。
+- **第二层坑（编号撞车，退订解决不了）**：thread key 就是 `github:<编号>`，**完全与仓库无关**。新仓库的 Issue #2 复用了旧仓库 PR #2 的 key `github:2`，而该 key 的 meta 里还留着 `isPr:true` + 旧仓库 URL → 轮询按 PR 走，去新仓库读 `pulls/2` → 404（错误串 `github:2: Error: gh: Not Found (HTTP 404)`）。退订只清订阅、不清 meta，所以会复发。
+- 彻底解法：停服务后把旧线程的 stale meta 清空，让它按当前仓库重新识别 `isPr` / `title` / `url`（保留 subscriptions，工单关联不断）：
+
+  ```sh
+  python3 scripts/dsh-superagent stop --profile superagent
+  python3 - <<'PY'
+  import sqlite3, json
+  db = sqlite3.connect('/home/ps/.dsh/state/superagent/orchestrator.sqlite')
+  for r in db.execute("select key,value from thread where key like 'github%'").fetchall():
+      v = json.loads(r['value'])
+      if v.get('meta'):
+          v['meta'] = {}
+          db.execute("update thread set value=? where key=?", (json.dumps(v, ensure_ascii=False), r['key']))
+  db.commit()
+  PY
+  python3 scripts/dsh-superagent start --profile superagent
+  ```
+
+  本机实测：清完 meta 并重启后，health 十项全 `ready`、`errors: {}`、github 源恢复 `ready`。**换仓库后如果又出现莫名其妙的 404 轮询失败，先想到这条。**
+- 顺带说明：`github-cursor:*` / `github-ci:*` 这类 KV 游标也是按编号存的，留在库里无害（同号 Issue 会被当作「已读过」而不重复处理），要彻底重置可一并删掉。
 
 ### 11.4 迁移后验收（2026-11-26）
 
