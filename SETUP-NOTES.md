@@ -51,9 +51,11 @@
 
 - 操作者账号：`lhbtata`（本机主账号，提需求的人）。
 - agent 账号：`lhbtata-superagent`（agent 身份；PR 提交以该账号 author/committer 署名）。
-- 仓库归属：靶场仓库在 **agent 账号自己名下**（公开）。
-  - 原因：操作者账号的 OAuth token 缺少管理类 scope，`POST /repos/.../collaborators` 等端点被 GitHub 判 404（§7）；agent 自持仓库则天然有 push 权限，完全绕开。
-  - 若日后要恢复「仓库在操作者名下 + 私有 + 协作者授权」的官方原始模型，需在浏览器网页端添加协作者（本机 API 不可用）。
+- 仓库归属：**靶场仓库在操作者账号 `lhbtata` 名下（私有）**，agent 账号 `lhbtata-superagent` 作为 **collaborator（push，无 admin）** 参与。
+  - 这是官方推荐形态：`SETUP.md` 第 2 问指定 owner/name 仓库、第 3 问要求「专用账号，绝不用操作者本人账号」，第 67 行的 operator steps 包含「以 agent 账号接受仓库邀请」；`docs/006-deployment.md` 也写明「给 agent 建一个 GitHub 用户账号并授予该仓库写权限」。
+  - 2026-11-26 已从旧形态（仓库在 agent 账号名下、公开）切过来：`gh api -X PUT repos/lhbtata/superagent-sandbox/collaborators/lhbtata-superagent -f permission=push` → 201（invitation 346440054），再由 agent 账号 `gh-agent api -X PATCH user/repository_invitations/346440054` 接受。
+  - 好处：agent 账号**没有 admin**，不能自行合并自己的 PR（auto-merge 默认 No、由人合并）。旧形态下 agent 自持仓库有 admin，实测它把自己的 PR #2/#4 都自己合了，违反哲学。
+  - 旧仓库 `lhbtata-superagent/superagent-sandbox`（public、agent 自持）是切换前的遗留，处置见 §11。
 - `gh-agent` 与操作者的 `gh` 凭据目录完全独立（`~/.config/gh-agent` 与 `~/.config/gh`）。
 - worker 的 git 凭据走 stateDir 下自动生成的 `worker-gitconfig`（credential helper 指向 `gh-agent`，SSH 强制转 HTTPS），与操作者本机 git 配置隔离。
 - 换 agent 账号时只需：`GH_CONFIG_DIR=~/.config/gh-agent gh auth login`，然后面板 Sources 重存一次触发 setup 重校验。
@@ -65,7 +67,7 @@
   - `vllm-local`（`baseURL=http://192.168.0.102:18000/v1`，模型 id `/models/awq`）；
   - `agent-default-model = minimax-cn / MiniMax-M3.1-Flash`。
   - 面板里 eval.model / executor.model 均为 null → 回落到 agent-default-model。
-- GitHub Source：repository `lhbtata-superagent/superagent-sandbox`，cli `/home/ps/.local/bin/gh-agent`，pollSeconds 60，observe* 全关（仅 @ 提及触发）。
+- GitHub Source：repository `lhbtata/superagent-sandbox`（操作者名下、私有），cli `/home/ps/.local/bin/gh-agent`，pollSeconds 60，observe* 全关（仅 @ 提及触发）。
 - Policy：allowed = `lhbtata`（只有操作者能发起）；rules 为默认 copy / visual 两条；飞书源另有一份 allowed（按**应用级** open_id，见 §5.8）。
 - Executor：maxWorkers 3，工作目录 `/home/ps/.dsh/state/superagent/work`，prepare =
   `git -C /home/ps/src/superagent-sandbox fetch --no-tags <repo>.git <pr-head>:refs/dsh-superagent/<ticket> && git worktree add -b agent/<name> <dir> ...`
@@ -262,6 +264,7 @@ def dsh_service(name, args):
 
 - GitHub 对「token 无权管理」的管理类端点按惯例回 404/403，而不是带说明的 403 → 早期在网络不稳下看到的是裸 404/403 噪声。
 - 补 scope：`gh auth refresh -h github.com -s delete_repo`（浏览器设备码授权）。协作者管理类端点即便补了 scope 仍可能 404，那就走网页端。
+- **2026-11-26 更新**：GitHub 访问恢复后，`PUT /repos/lhbtata/superagent-sandbox/collaborators/lhbtata-superagent -f permission=push` 已返回 **201**，邀请可由 agent 账号接受（§11.2）。所以「协作者端点一律 404」不是常态，而是当时的 token/网络状态问题。
 
 **(c) `github.com:443` 间歇性超时（仍存在）**
 
@@ -284,6 +287,7 @@ def dsh_service(name, args):
 
 12. **飞书通道验收（2026-11-25 17:33）**：在「dsh-agent组1」群里发 `@Super-agent 介绍一下自己`（当时应用还叫「刘海宾的飞书 CLI」，2026-11-26 改名）→ bot 在**会话线程**内回帖成功（`outbox` 记录 `status: "sent"`，线程 `omt_186323b398ce5ca7` 内用户 17:33 + bot 17:38 两条）。走的是直答路径：不建工单（决策 outcome=ignore、reason code=`said`），符合「不涉及仓库改动就只在会话里回答」的策略。库里链路完整：trigger 3 条（1 条入群系统消息 + 2 条 mention）→ decision 4 条（先 `not_a_member`×2，写 allowed 后 requeue → `said`×2，strength inferred→explicit）→ thread 6 个（github:1-4 + feishu 三条）。
 13. **诊断期临时仓库已全部删除**：`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125` 经 API 返回 404（确认已删），操作者与 agent 账号下均无残留。
+14. **仓库归属切换后的第三次试跑（2026-11-26）**：仓库改为操作者名下 `lhbtata/superagent-sandbox`（agent 作 collaborator，push 无 admin）→ Issue #2「试跑3：README 第二行末尾补句号」→ Ticket `99af264927220e1a1513aea79ff80c0b` → **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号，commit 署名 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`；PR `merged=false / merged_by=null` —— agent 这次**没有 admin，无法自合**，必须由操作者合并。切换过程中的 404 故障与处理见 §11.3。
 
 ## 9. 升级流程
 
@@ -298,7 +302,7 @@ python3 scripts/dsh-superagent restart --profile superagent
 ## 10. 日常操作速查
 
 - 查状态：`python3 scripts/dsh-superagent status --profile superagent`
-- 提新需求：操作者在靶场仓库**发新评论** `@lhbtata-superagent <请求>`（编辑 Issue 正文不触发）。
+- 提新需求：操作者在靶场仓库 `lhbtata/superagent-sandbox` **发新评论** `@lhbtata-superagent <请求>`（编辑 Issue 正文不触发）。
 - 看进度：面板 `http://127.0.0.1:3082`（Overview / Tickets），或在本机调管理 API（token 按 §2 的方式从启动日志取到变量里用，不回显）：
   ```sh
   TOK=$(grep -oE 'token=[A-Za-z0-9_-]{20,}' "$(ls -t .artifacts/dsh-superagent-superagent-*.log | head -1)" | head -1 | cut -d= -f2)
@@ -313,4 +317,53 @@ python3 scripts/dsh-superagent restart --profile superagent
   ~/.local/bin/lark-bot im +chat-members-list --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --member-types user,bot --as bot
   ```
 - 诊断期建的 3 个临时仓库（`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125`）**已全部删除**（API 返回 404 确认），无需再清理。
-- 尚待人工处理：**无**（2026-11-26 起，飞书权限已申请并发布，应用已改名「Super-agent」，通道已验收通过）。此处的「无」仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
+- 尚待人工处理：**① PR #3（迁移后验收单）待操作者合并；② 旧仓库 `lhbtata-superagent/superagent-sandbox` 处置待拍板（删除 / 转 private / 归档）。** 其余（飞书权限、应用改名、通道验收）已于 2026-11-26 完成。此处的待办仅指**当时的待办清单已清空**，不表示以后没有需要人工决定的事：接收名单仍需按 §5.8 的白名单口径维护（新增需求人时要手动加 open_id；`syncChat` 保持关闭）。
+
+## 11. 仓库归属切换（2026-11-26）
+
+### 11.1 为什么要切
+
+- 官方形态是「**仓库归操作者/组织**，agent 账号作为 collaborator 拿写权限」：`SETUP.md:38-39`（第 2 问指定仓库、第 3 问要求专用账号）、`SETUP.md:67`（operator steps 含「以 agent 账号接受仓库邀请」）、`docs/006-deployment.md:33`。
+- 切换前是权宜之计：当时操作者 token 缺管理类 scope，`POST /repos/.../collaborators` 被 GitHub 判 404（§7），只好让 agent 自持仓库。**2026-11-26 GitHub 访问恢复后该端点已可正常调用**（201 + 接受邀请），原始形态可恢复。
+- 切换前的代价：agent 自持仓库 → agent 有 admin → 实测它把自己的 PR #2/#4 都自己合了（`merged_by = lhbtata-superagent`），违反「auto-merge 默认 No、由人合并」。
+
+### 11.2 切换步骤
+
+```sh
+# 1) 加 collaborator（操作者 token 即可）
+gh api -X PUT repos/lhbtata/superagent-sandbox/collaborators/lhbtata-superagent -f permission=push
+# 2) 由 agent 账号接受邀请
+gh-agent api -X PATCH user/repository_invitations/346440054
+# 3) 本地克隆改指向
+cd /home/ps/src/superagent-sandbox
+git remote set-url origin https://github.com/lhbtata/superagent-sandbox.git
+git fetch --no-tags origin && git reset --hard origin/main
+# 4) 面板改仓库（source 块在 sources 数组里，见 §5.7）
+PUT /orchestrator/api/settings/source:github
+{"value":{"enabled":true,"config":{"repository":"lhbtata/superagent-sandbox","cli":"/home/ps/.local/bin/gh-agent",
+ "pollSeconds":60,"failuresBeforeError":3,"observeIssues":false,"observePulls":false,"observeComments":false,"observeCi":false}},"revision":2}
+# 5) 重启
+python3 scripts/dsh-superagent restart --profile superagent
+```
+
+### 11.3 切换后的坑：旧仓库的 thread 会 404
+
+- 现象：切仓库后 github 源进入 `error`，报 `3 consecutive failed polls; last: Error: 3 GitHub reads failed: github:2: …404; github:3: …404; github:4: …404`。
+- 原因：thread / 游标是**按编号存的、与仓库无关**（`github:2`、`github-cursor:2`、`github-ci:2`）。旧仓库的 Issue #2/#3/#4 仍是 subscribed 线程，轮询时去新仓库读同号 Issue → 新仓库只有 #1 → 404；`deleted(error)` 只认 410，404 不算删除，线程不会自动丢弃。
+- 处理（用官方 API，不改数据库）：
+
+  ```sh
+  for k in github:1 github:2 github:3 github:4; do
+    curl -s -X POST -H 'x-orchestrator-request: 1' \
+      "http://127.0.0.1:3082/orchestrator/api/threads/$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$k")/unsubscribe"
+  done
+  ```
+
+  退订后下一轮即恢复 `ready`（`0 notifications; next poll ≥ 60s`）。同法可清 `github-cursor:*` / `github-ci:*` 残留（留在 DB 里无害，只是同号 Issue 会被当作已读过）。
+
+### 11.4 迁移后验收（2026-11-26）
+
+- 操作者在 `lhbtata/superagent-sandbox` 发 Issue #2「试跑3：README 第二行末尾补句号」，正文 @`lhbtata-superagent` → 约 60s 内成单（Ticket `99af264927220e1a1513aea79ff80c0b`，strength=explicit）。
+- agent 提交 **PR #3**（分支 `agent/readme-add-period-new-99af2649…`），diff 恰好一行补句号；commit author/committer 均为 `lhbtata-superagent <360978419+lhbtata-superagent@users.noreply.github.com>`。
+- collaborator 权限核对：`lhbtata-superagent` = push ✅ / admin ❌；PR #3 `merged=false, merged_by=null` —— **agent 不能自己合并，需操作者审阅合并**，符合 §11.1 的哲学。
+
