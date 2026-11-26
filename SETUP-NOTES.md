@@ -93,7 +93,9 @@ LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" \
 
 - 该命令会打印浏览器链接（形如 `https://open.feishu.cn/page/cli?user_code=XXXX-XXXX`）并**阻塞等待**在浏览器完成配置；应放后台跑，日志留在本地。
 - 完成后输出 `OK: 应用配置成功! App ID: cli_xxxxxxxx`，配置写入 `~/.lark-cli-dsh-superagent/config.json`（0600，`appSecret` 只显示 `****`，**不要去取明文**）。
-- 本机结果：app id `cli_ab8c1481eba39d1c`，bot open_id `ou_9e4c73b1e5c096278531569d9fa4a64d`，应用名默认「刘海宾的飞书 CLI」。
+- 本机结果：app id `cli_ab8c1481eba39d1c`，bot open_id `ou_9e4c73b1e5c096278531569d9fa4a64d`。
+  - 应用名**已在开发者后台改为「Super-agent」**（2026-11-26）。改名前它叫「刘海宾的飞书 CLI」，与个人 CLI 应用同名，@ 时按名字搜容易混淆。**改名不影响 open_id**，policy 里的 allowed 不用动。
+  - 改名后需 `restart` 才能让 host 侧缓存的 bot 名刷新（`setup.accounts.feishu.name` 与面板 `facts.cli`）——实测重存 source 块**不会**刷新，重启才会。
 
 ### 5.3 strict mode 只允许 bot 身份
 
@@ -160,6 +162,9 @@ plugins:
 
 - feishu 源允许写 `{"id":"ou_…","name":"…"}`（`src/sources/feishu.ts:73`），**github 源不允许带 `name`**（strict schema，`src/sources/github.ts:72`），带了就报 `Unrecognized key: "name"`。
 - 本机已写：`sources.feishu.allowed = [{"id":"ou_301ab27830ae4e1d02dd77873e1afc9c","name":"刘海宾"}]`（这是刘海宾在**本应用**下的 open_id，与个人应用里的 open_id 不同）。
+- **写整块 policy 时必须带完整的 `rules` 原样回填**：`rules[]` 的 schema 是 `{id, name, enabled, instruction}`，写 `kind` 会被拒（`Unrecognized key: "kind"`），漏字段也会被拒（`rules.0.id: expected string, received undefined`）。最稳的做法是 GET 一次 `settings`，把 `blocks.policy.value` 原样取出、只改 `sources` 里要动的字段再 PUT 回去。
+- **syncChat（名单自动同步）**：给 feishu 源填 `syncChat` = 群 chat_id，名单就会跟着群成员走（新成员进、离开的移除、名字取群里的名字），在启动时和点「立即同步」时执行。本机已配 `syncChat: "oc_167db7fc1fc970bcf8716e2616f1a3a6"`，`POST /orchestrator/api/policy-sync/feishu` 返回 `{"policy":{"allowed":[{"id":"ou_301ab…","name":"刘海宾"}],"syncChat":"oc_…","admission":{}}}`。
+  - 没填 `syncChat` 时调该接口会报 `nothingToSync`（`The feishu Source's part of the Policy has nothing to sync from`）。
 
 ### 5.9 重启并验收
 
@@ -176,10 +181,27 @@ python3 scripts/dsh-superagent restart --profile superagent   # 插件需重启�
 | open_id 是应用级的 | 用旧应用的 open_id 调 API → `99992361 … how-to-obtain-openid` | 用**本应用**下的 open_id；改应用名不影响 open_id |
 | policy 名单为空 | 消息被收到但不建单，决策 reason = `not_a_member`（`src/policy.ts:210`） | 写 `sources.feishu.allowed` 后，对已有触发器 `POST /orchestrator/api/triggers/<id>/requeue` 才会重新评估 |
 | 事件 JSON 顶层平铺 | 按 `event.sender.sender_id.open_id` 解析得到 null | 实际结构是**顶层** `sender_id`（即 open_id）、`mentions[0].id`（被 @ 的 bot open_id）、`chat_id`、`message_id`、`content` |
-| 权限不足 | `99991672 app_scope_not_applied`；`+chat-members-list` 报缺 `im:chat`/`im:chat:readonly`/`im:chat.group_info:readonly`/`im:chat.members:read` | 开发者后台申请这些 scope 并**发布版本**；错误里带 `console_url` 可直接跳转 |
+| 权限不足 | `99991672 app_scope_not_applied`；`+chat-members-list` 报缺 `im:chat`/`im:chat:readonly`/`im:chat.group_info:readonly`/`im:chat.members:read` | 开发者后台申请 scope 并**发布版本**；错误里带 `console_url` 可直接跳转。实际可用的最小集合见 §5.11 |
 | `event consume` 超时参数 | `--timeout` 必须带单位（如 `8s`），否则报错 | 调试监听建议 `--max-events N --timeout 600s` |
-| 两个同名应用 | 开发者后台出现两个「刘海宾的飞书 CLI」 | 不是故障原因（群里只有新 bot，@ 的 open_id 就是它），但 @ 时按名字搜容易混淆 → 把新应用改名「Super-agent」 |
+| 两个同名应用 | 开发者后台出现两个「刘海宾的飞书 CLI」 | 不是故障原因（群里只有新 bot，@ 的 open_id 就是它），但 @ 时按名字搜容易混淆 → 把新应用改名「Super-agent」（本机已改，见 §5.2） |
 | 直答不建单 | 自我介绍/闲聊类请求 → 决策 outcome=ignore、reason code=`said` | 预期行为：直接在原会话作答，不开工单 |
+| 应用改名 | 改名后 `setup.accounts.feishu.name` 仍是旧名 | 需 `restart`（重存 source 块不刷新缓存的 bot 名） |
+| `im:chat.group_info:readonly` 不存在 | 开发者后台搜不到这个权限 | 见 §5.11：群信息由 `im:chat` / `im:chat:readonly` 覆盖，不单独申请 |
+
+### 5.11 权限清单（2026-11-26 实际申请并验证）
+
+开发者后台给 `cli_ab8c1481eba39d1c` 申请并发布版本后，`lark-bot auth scopes --json` 显示 5 项：
+
+```
+offline_access, im:chat, im:chat.members:read, im:chat.members:write_only, im:chat:readonly
+```
+
+- **`im:chat.group_info:readonly` 在后台并不存在**，不需要申请——群信息由 `im:chat` / `im:chat:readonly` 覆盖。早期文档里把它列进必需清单是照抄了错误提示文本，实际申请时按 `im:chat` 即可。
+- 验证（权限生效后全部通过）：
+  - `im +chat-members-list --chat-id <chat> --member-types user,bot --as bot` → 正常返回 1 user + 1 bot；
+  - `im +chat-list --as bot` → 正常返回所在群；
+  - `POST /orchestrator/api/policy-sync/feishu` → 同步成功（见 §5.8 的 syncChat）。
+- 仍不可用的（需要额外权限或换做法）：把 bot 主动拉进**别的**群（`im:chat.members:write_only` 只覆盖 bot 所在租户的成员管理，跨群拉 bot 需在群里由管理员添加）。
 | 应用改名/换号后 | 旧的 allowed 里的 open_id 失效 | 重新用 `event consume` 抓本应用下的 open_id 并更新名单 |
 
 ## 6. 本地补丁（升级时必须保留）
@@ -257,7 +279,7 @@ def dsh_service(name, args):
 10. 人工合并 PR #4（merged_at 2026-11-25T08:47:12Z）→ 工单同样自动收尾（`ended{outcome: merged}`），工单列表随即为空；合并瞬间又出现一次同样的 AggregateError 残留（08:47:25Z），`restart` 后 `status` 回到 exit=0、health 十项全 ready。两次合并的表现一致：残留错误只影响面板与退出码，不影响已合并的结果。
 11. **脚本修复的实效**：`scripts/dsh-superagent` 的进程识别修复（§6）落地后，`status` 只报服务进程（`pids` 1 个）、`exit=0`，`restart` 能可靠停掉旧进程并起新进程（本次新 pid `3872932`）——修复前 `stop`/`restart` 会判「服务没在跑」，上面第 8、10 条的残留错误就清不掉。
 
-12. **飞书通道验收（2026-11-25 17:33）**：在「dsh-agent组1」群里发 `@刘海宾的飞书 CLI 介绍一下自己` → bot 在**会话线程**内回帖成功（`outbox` 记录 `status: "sent"`，线程 `omt_186323b398ce5ca7` 内用户 17:33 + bot 17:38 两条）。走的是直答路径：不建工单（决策 outcome=ignore、reason code=`said`），符合「不涉及仓库改动就只在会话里回答」的策略。
+12. **飞书通道验收（2026-11-25 17:33）**：在「dsh-agent组1」群里发 `@Super-agent 介绍一下自己`（当时应用还叫「刘海宾的飞书 CLI」，2026-11-26 改名）→ bot 在**会话线程**内回帖成功（`outbox` 记录 `status: "sent"`，线程 `omt_186323b398ce5ca7` 内用户 17:33 + bot 17:38 两条）。走的是直答路径：不建工单（决策 outcome=ignore、reason code=`said`），符合「不涉及仓库改动就只在会话里回答」的策略。库里链路完整：trigger 3 条（1 条入群系统消息 + 2 条 mention）→ decision 4 条（先 `not_a_member`×2，写 allowed 后 requeue → `said`×2，strength inferred→explicit）→ thread 6 个（github:1-4 + feishu 三条）。
 13. **诊断期临时仓库已全部删除**：`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125` 经 API 返回 404（确认已删），操作者与 agent 账号下均无残留。
 
 ## 9. 升级流程
@@ -281,11 +303,11 @@ python3 scripts/dsh-superagent restart --profile superagent
   unset TOK
   ```
 - 合并：worker 默认不自动合并 PR，由操作者审阅后合并；合并后跑一次 `restart` 清 worker 残留错误（§2）。
-- 飞书提需求：在「dsh-agent组1」群里 `@刘海宾的飞书 CLI <请求>`（只响应 @ 提及；改用新应用名后同步改 @ 对象）。
+- 飞书提需求：在「dsh-agent组1」群里 `@Super-agent <请求>`（只响应 @ 提及；应用已于 2026-11-26 改名为「Super-agent」，@ 时选这个名字）。
 - 飞书相关自检：
   ```sh
   ~/.local/bin/lark-bot auth status --json     # bot ready 且无 user 登录态
   ~/.local/bin/lark-bot im +chat-members-list --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --member-types user,bot --as bot
   ```
 - 诊断期建的 3 个临时仓库（`lhbtata/sa-collab-probe`、`lhbtata-superagent/sa-collab-test`、`lhbtata/sa-deltest-1125`）**已全部删除**（API 返回 404 确认），无需再清理。
-- 尚待人工处理（不影响运行）：① 开发者后台给 `cli_ab8c1481eba39d1c` 申请 `im:chat` / `im:chat:readonly` / `im:chat.group_info:readonly` / `im:chat.members:read` / `im:chat.members:write_only` 并发布版本（否则 syncChat、bot 加人不可用）；② 把新应用改名为「Super-agent」，避免与个人 CLI 应用同名混淆（改名不影响 open_id）。
+- 尚待人工处理：**无**（2026-11-26 起，飞书权限已申请并发布，应用已改名「Super-agent」，通道已验收通过）。
