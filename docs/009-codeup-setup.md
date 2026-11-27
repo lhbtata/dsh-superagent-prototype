@@ -32,25 +32,40 @@ the profile before configuring the Source.
 
 ## Phase 0: what has to be true first
 
-These are not optional. The xuanjiAPP repository does not pass them today.
+Status on 2026-11-27: item 1 is waived by the repository owner, item 2 still needs the owner, items 3 and 4 are done,
+and a fifth cleanup is committed but not pushed.
 
-1. **Secrets out of the history.** `back/src/main/java/com/xuanji/utils/ALDYUtil.java` and `ALDYUtil2.java` hold an
-   Aliyun access key in clear text, and the key is in the git history as well. Rotate the key, then rewrite the
-   history (or drop the file from the history) before the repository is reachable by anyone else.
+1. **Secrets out of the history** — WAIVED by the repository owner on 2026-11-27: the Aliyun access key in
+   `back/src/main/java/com/xuanji/utils/ALDYUtil.java` and `ALDYUtil2.java` stays as it is. The key is still in the
+   git history, so the repository must stay inside the people who already have it.
 2. **A Codeup personal access token.** The `codeup` CLI reads `CODEUP_TOKEN`, or `YUNXIAO_PERSONAL_TOKEN`, or
    `~/.config/codeup-agent/config.json`. The token needs read and write on the repository: the agent pushes branches
    and opens change requests.
-3. **A base clone for the prepare command.** The prepare command fetches into a local clone and adds a worktree per
-   ticket, so it needs its own clone, not the working copy of the operator:
+3. **A base clone for the prepare command** — DONE. The prepare command fetches into a local clone and adds a
+   worktree per ticket, so it needs its own clone, not the working copy of the operator:
 
    ```bash
-   git clone --no-checkout git@codeup.aliyun.com:63156676050e9c4a07a96998/xuanjiAPP.git /home/ps/src/xuanjiAPP
+   git clone git@codeup.aliyun.com:63156676050e9c4a07a96998/xuanjiAPP.git /home/ps/src/xuanjiAPP
+   git -C /home/ps/src/xuanjiAPP checkout -b base origin/release/three-app-base
    ```
+
+   Two traps, both hit and fixed on this machine:
+
+   - `git clone --no-checkout` leaves HEAD on a remote-tracking branch, and `git worktree add -b` then fails with
+     "fatal: HEAD does not point to a branch" — every ticket would have failed its prepare step.
+   - The remote's HEAD is `master`, last touched 2025-07-21 and 1047 commits behind the working branch. The prepare
+     command names the base branch explicitly, because a bare `HEAD` fallback checks out the wrong code.
 
    The worker reaches Codeup over SSH through the ssh-agent (`SSH_AUTH_SOCK` must be set for the dsh process).
 
-4. **The project toolchain.** `pwsh` is missing on this machine, so `build/sync-dual-source.ps1` cannot run here;
-   `python3 tools/check_dual_source.py` is the Linux check and it passes today.
+4. **The project toolchain** — DONE. PowerShell 7.7.0 is installed for the operator account
+   (`/home/ps/.local/opt/powershell`, `pwsh` on PATH through `/home/ps/.local/bin`), so
+   `build/sync-dual-source.ps1` runs here; `python3 tools/check_dual_source.py` stays the Linux check and it passes
+   today.
+5. **Audit run logs out of the index** — DONE, not pushed. The 186 `*.log` files under
+   `docs/farming-task-catalog/ops/audit/health/` are re-runnable output (one of them reached 106 MB in the history),
+   so they were untracked and ignored. The `summary.tsv` and `*.csv` / `*.md` / `*.json` conclusions in the same
+   directories stay tracked. Commit `63a2ddbd` on `release/three-app-base` of the working copy.
 
 ## Phase 2: configuration draft
 
@@ -145,7 +160,7 @@ the pilot starts, not before.
   "model": null,
   "maxWorkers": 2,
   "directory": "/home/ps/.dsh/state/superagent/work",
-  "prepare": "git -C /home/ps/src/xuanjiAPP fetch --no-tags \"git@codeup.aliyun.com:$DSH_SUPERAGENT_CODEUP_REPOSITORY.git\" \"${DSH_SUPERAGENT_CODEUP_MR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\" && git -C /home/ps/src/xuanjiAPP worktree add -b \"agent/$DSH_SUPERAGENT_NAME\" \"$DSH_SUPERAGENT_DIR\" \"refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\"",
+  "prepare": "git -C /home/ps/src/xuanjiAPP fetch --no-tags \"git@codeup.aliyun.com:$DSH_SUPERAGENT_CODEUP_REPOSITORY.git\" \"${DSH_SUPERAGENT_CODEUP_MR_HEAD:-refs/heads/release/three-app-base}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\" && git -C /home/ps/src/xuanjiAPP worktree add -b \"agent/$DSH_SUPERAGENT_NAME\" \"$DSH_SUPERAGENT_DIR\" \"refs/dsh-superagent/$DSH_SUPERAGENT_TICKET\"",
   "blockedCommands": []
 }
 ```
@@ -153,6 +168,11 @@ the pilot starts, not before.
 The prepare command runs in the parent directory of the ticket directory. It fetches the source branch of the change
 request into a ticket-scoped ref and adds a worktree named after the ticket, so the worker edits a checkout of its
 own. The URL is rewritten by the worker's git configuration from `git@codeup.aliyun.com:` to the SSH form.
+
+The fallback after `DSH_SUPERAGENT_CODEUP_MR_HEAD` is `refs/heads/release/three-app-base`, not `HEAD`: the remote's
+`HEAD` is `master`, which stopped moving on 2025-07-21. With the fallback in place, a ticket without a change
+request still starts from the current development branch — verified end to end on 2026-11-27 by running the prepare
+command against `/home/ps/src/xuanjiAPP` and adding a worktree.
 
 ### prompts
 
