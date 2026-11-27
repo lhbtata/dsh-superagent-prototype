@@ -107,11 +107,22 @@ else
   ok "历史里未检出密钥字面量"
 fi
 
-TRACKED_ENV="$(git ls-files | grep -E '(^|/)\.env($|\.)' | head -10)"
+# 真 .env（含真实值的本地环境文件）被跟踪 = 问题；.env.example 这类模板不算，
+# 但模板里也不该出现非空的凭据值。
+TRACKED_ENV="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '\.(example|sample|template)$' | head -10)"
 if [ -n "$TRACKED_ENV" ]; then
   bad "有 .env 类文件被 git 跟踪" "$(printf '%s' "$TRACKED_ENV" | tr '\n' ' ')"
 else
   ok "没有 .env 类文件被跟踪"
+fi
+
+TRACKED_ENV_TPL="$(git ls-files | grep -E '(^|/)\.env\.(example|sample|template)$' | head -10)"
+if [ -n "$TRACKED_ENV_TPL" ]; then
+  if printf '%s\n' "$TRACKED_ENV_TPL" | xargs -r grep -lE '^[[:space:]]*[A-Za-z_]*(SECRET|PASSWORD|TOKEN|ACCESS_KEY|APP_KEY)[A-Za-z_]*[[:space:]]*=[[:space:]]*[^[:space:]#]' 2>/dev/null | head -3 | grep -q .; then
+    bad "模板文件里出现非空凭据赋值" "$(printf '%s' "$TRACKED_ENV_TPL" | tr '\n' ' ')"
+  else
+    ok "被跟踪的 .env 模板文件没有凭据值" "$(printf '%s' "$TRACKED_ENV_TPL" | tr '\n' ' ')"
+  fi
 fi
 
 # 历史大 blob：Codeup 单文件上限 200MB，GitHub 100MB
