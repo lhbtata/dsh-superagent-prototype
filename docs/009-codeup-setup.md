@@ -40,7 +40,11 @@ and a fifth cleanup is committed but not pushed.
    git history, so the repository must stay inside the people who already have it.
 2. **A Codeup personal access token.** The `codeup` CLI reads `CODEUP_TOKEN`, or `YUNXIAO_PERSONAL_TOKEN`, or
    `~/.config/codeup-agent/config.json`. The token needs read and write on the repository: the agent pushes branches
-   and opens change requests.
+   and opens change requests. To obtain one: Aliyun Yunxiao → personal settings → personal access tokens → create a
+   token with repository read and write. Copy the template `/home/ps/.config/codeup-agent/config.json.example` to
+   `/home/ps/.config/codeup-agent/config.json`, fill in the token, and get the repository id with
+   `codeup api repos/63156676050e9c4a07a96998/xuanjiAPP` (it answers `id` and `permissions`). Keep that file at
+   mode 600; the CLI reads the token from it and never writes it back.
 3. **A base clone for the prepare command** — DONE. The prepare command fetches into a local clone and adds a
    worktree per ticket, so it needs its own clone, not the working copy of the operator:
 
