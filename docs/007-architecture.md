@@ -367,6 +367,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
+| `src/sources/codeup.ts` | The Codeup kind and plugin entry, exported as `./codeup-watch`: a poll round of the repository's open merge requests and the comments of subscribed Threads |
+| `src/sources/codeup-trigger.ts` | Codeup change request comments and reviews as Triggers, and Codeup addresses |
+| `src/sources/codeup-pull.ts` | The merge request rules: which merge requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and the notices of a Ticket that ended merged or closed |
+| `src/sources/codeup-channel.ts` | The Codeup Channel: change request comments, `sent` or `gone` |
+| `src/sources/codeup-read.ts` | Repository reads, the `codeup/` resources, and `codeupThreadContext`: a change request's conversation by page |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
@@ -397,7 +402,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/codeup.ts` and `src/sources/feishu.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./codeup-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the four plugins, with Codeup and Feishu disabled.
 
 ## Tests
 

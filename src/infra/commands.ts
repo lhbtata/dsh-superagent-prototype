@@ -1,4 +1,4 @@
-/** Subprocess wrapper for running gh, lark-cli, and git commands under the deployment's configured accounts. */
+/** Subprocess wrapper for running the code host CLI, lark-cli, and git commands under the deployment's configured accounts. */
 import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
@@ -20,10 +20,11 @@ export function commandError(error: unknown, program = 'command'): Error {
   const exitCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'number' ? error.code : undefined
   if (error && typeof error === 'object' && 'stderr' in error && typeof error.stderr === 'string') {
     const stderr = error.stderr.trim()
-    let parsed: { error?: { code?: number; message?: string } } | undefined
+    let parsed: { error?: { code?: number; status?: number; message?: string } } | undefined
     try { parsed = JSON.parse(stderr.slice(stderr.indexOf('{'))) as typeof parsed }
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
-    const code = parsed?.error?.code
+    // `gh` reports `code`, the Codeup CLI reports `status`; both carry the HTTP status a caller maps on.
+    const code = parsed?.error?.code ?? parsed?.error?.status
     if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
@@ -40,6 +41,21 @@ function ended(error: unknown): string {
   return typeof code === 'string' ? `could not run: ${code}` : 'failed'
 }
 export interface Tally { skipped: number }
+/** The Codeup API page size the manual pagination asks for. */
+const CODEUP_PAGE_SIZE = 50
+/** A ceiling on manual pagination, so a server that always answers a full page cannot loop forever. */
+const MAX_CODEUP_PAGES = 200
+/** Codeup list endpoints answer either with a bare array or with the array under `items`, `result` or `data`. */
+function codeupItems(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body
+  if (body && typeof body === 'object') {
+    for (const key of ['items', 'result', 'data'] as const) {
+      const value = (body as Record<string, unknown>)[key]
+      if (Array.isArray(value)) return value
+    }
+  }
+  return []
+}
 /** Parses array elements against a schema, skipping invalid items and incrementing `tally.skipped`. */
 export function validItems<T>(item: z.ZodType<T>, list: readonly unknown[], tally?: Tally): T[] {
   const items = list.flatMap(value => { const parsed = item.safeParse(value); return parsed.success ? [parsed.data] : [] })
@@ -53,7 +69,7 @@ function membership(error: unknown): unknown {
   return new CliError(hint, error.code, error.exitCode)
 }
 /**
- * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
+ * Executes code host, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
  * Restricts GitHub API calls to the configured repository and translates CLI failures into CliError instances for Sources, MasterAssessor, Outbox, and Settings.
  */
 export class Commands {
@@ -72,8 +88,8 @@ export class Commands {
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
-  /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  /** Runs the agent's code host CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
+  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.account.cli, args)) as T }
   /**
    * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
    * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
@@ -82,7 +98,7 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    if (typeof schema === 'string') return this.run(this.deployment.account.cli, ['api', this.path(schema), ...rest])
     const [path = '', ...flags] = rest
     return schema.parse(await this.gh(['api', this.path(path), ...flags]))
   }
@@ -90,6 +106,35 @@ export class Commands {
   async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
     const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
     return validItems(item, pages.flat(), tally)
+  }
+  /**
+   * Runs the code host CLI and parses its JSON output.
+   * On a Codeup deployment this is the Codeup CLI, whose `api <path>` subcommand answers the JSON shapes the Codeup Source needs.
+   */
+  async codeup<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.account.cli, args)) as T }
+  /**
+   * Calls the Codeup API on a path and validates the JSON answer against a schema.
+   * The path is passed verbatim: Codeup API paths are absolute, not relative to the configured repository.
+   * @throws CliError with the CLI's exit status on failure.
+   */
+  async codeupApi<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T> {
+    return schema.parse(await this.codeup<unknown>(['api', path, ...flags]))
+  }
+  /**
+   * Fetches every page of a Codeup API list, skipping items that fail schema validation.
+   * The Codeup CLI has no pagination flag, so pages are requested one by one until a page comes back short.
+   * @param query - extra query pairs, each either `key=value` or a ready-made flag.
+   */
+  async codeupPages<T>(item: z.ZodType<T>, path: string, query: readonly string[], tally?: Tally): Promise<T[]> {
+    const collected: T[] = []
+    const extra = query.flatMap(pair => pair.startsWith('--') ? [pair] : ['--query', pair])
+    for (let page = 1; page <= MAX_CODEUP_PAGES; page += 1) {
+      const body = await this.codeup<unknown>(['api', path, '--query', `page=${page}`, '--query', `perPage=${CODEUP_PAGE_SIZE}`, ...extra])
+      const items = codeupItems(body)
+      collected.push(...validItems(item, items, tally))
+      if (items.length < CODEUP_PAGE_SIZE) break
+    }
+    return collected
   }
   private path(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)

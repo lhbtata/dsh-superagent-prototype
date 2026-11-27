@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import type { SetupCode } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
@@ -29,7 +30,7 @@ export interface Machine {
   admissionContextTimeoutMs: Volatile<number>
 }
 const MOVED: Record<string, string> = {
-  repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
+  repository: 'on the code host Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
   feishu: 'on the Feishu Source', author: 'prompt text', repositoryPath: 'in the prepare command of the Execution settings',
   worktreeRoot: 'the ticket directory of the Execution settings', blockedCommands: 'in the Execution settings',
 }
@@ -46,13 +47,32 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+/** The Codeup Source names its repository the same way GitHub does: `organization/repository`. */
+export const CodeupAccountsSchema = z.object({
+  repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'organization/repository').default(''),
+  cli: z.string().trim().default(''),
+})
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  github: Object.keys(GithubAccountsSchema.shape),
+  codeup: Object.keys(CodeupAccountsSchema.shape),
+  feishu: Object.keys(FeishuBotSchema.shape),
+}
 
+/** The code host the agent works on. */
+export type CodeHost = 'github' | 'codeup'
+/** The account the agent acts as on a code host, and the CLI that speaks to it. */
+export interface CodeAccount { cli: string; login: string; noreply: string }
 export interface Deployment extends Machine {
+  /** The repository the agent works in, named the way the code host names it. */
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** Which code host this deployment talks to. */
+  host: CodeHost
+  /** The account the agent acts as on that code host. */
+  account: CodeAccount
+  /** Codeup-specific identifiers; present only when `host` is `codeup`. */
+  codeup?: { organizationId: string; repositoryId: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -76,33 +96,65 @@ export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
-const RepositoryAccess = z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), push: z.boolean().nullable() })
+/** A Codeup account: the platform user endpoint answers with a login, an id that may be a string, and sometimes an email. */
+const CodeupUser = z.object({ login: z.string().min(1), id: z.union([z.string(), z.number()]).optional(), email: z.string().optional() })
+const RepositoryAccess = z.object({ name: z.string().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/), push: z.boolean().nullable() })
+/** A Codeup repository: `full_name`, its numeric id, and whether the account may push to it. */
+const CodeupRepositoryAccess = z.object({ full_name: z.string().optional(), id: z.union([z.string(), z.number()]).optional(),
+  permissions: z.object({ push: z.boolean().nullable() }).partial().default({}) })
 function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   let value: unknown
   try { value = JSON.parse(text) } catch { return undefined /* Non-JSON output; the caller surfaces the setup failure. */ }
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/** The setup problems every code host shares, and the Codeup name of each. */
+type HostProblem = 'repositoryUnset' | 'agentCliUnset' | 'agentCliMissing' | 'agentCliSignedOut'
+const CODEUP_PROBLEMS: Record<HostProblem, SetupCode> = {
+  repositoryUnset: 'codeupRepositoryUnset',
+  agentCliUnset: 'codeupAgentCliUnset',
+  agentCliMissing: 'codeupAgentCliMissing',
+  agentCliSignedOut: 'codeupAgentCliSignedOut',
+}
+/** Name the setup problem of a code host, so the panel can point at the Source card that owns it. */
+function hostProblem(host: CodeHost, key: HostProblem): SetupCode {
+  return host === 'github' ? key : CODEUP_PROBLEMS[key]
+}
+/**
+ * Verify the agent's CLI identity and push access to the configured repository.
+ * The same probes serve every code host: each CLI answers `api user` and `api repos/<owner>/<name>`.
+ */
+export async function resolveDeployment(machine: Machine, host: CodeHost, accounts: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
-  const accounts = GithubAccountsSchema.parse(github ?? {})
-  const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
-  if (!accounts.cli) throw new SetupError('agentCliUnset')
+  const config = (host === 'codeup' ? CodeupAccountsSchema : GithubAccountsSchema).parse(accounts ?? {})
+  const remote = config.repository
+  if (!remote) throw new SetupError(hostProblem(host, 'repositoryUnset'))
+  if (!config.cli) throw new SetupError(hostProblem(host, 'agentCliUnset'))
   let cli: string
-  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
+  try { cli = executable(config.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError(hostProblem(host, 'agentCliMissing'), { output: reason(error) }) }
+  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError(hostProblem(host, 'agentCliSignedOut'), { output: reason(error) }) })
+  if (host === 'codeup') {
+    const agent = parsed(CodeupUser, text)
+    if (!agent) throw new SetupError('codeupAgentCliNoAccount')
+    // Use the canonical repository name the code host answers with, so renamed repositories match incoming notifications.
+    const access = parsed(CodeupRepositoryAccess, await probe([cli, 'api', `repos/${remote}`]).catch((error: unknown) => {
+      throw new SetupError('codeupRepositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
+    }))
+    if (!access) throw new SetupError('codeupRepositoryUnreported', { repository: remote })
+    const repository = access.full_name || remote
+    if (access.permissions.push !== true) throw new SetupError('codeupRepositoryReadOnly', { account: agent.login, repository })
+    return { ...machine, repository, host, account: { cli, login: agent.login, noreply: agent.email || `${agent.login}@users.noreply.codeup.aliyun.com` },
+      codeup: { organizationId: remote.split('/')[0] ?? '', repositoryId: String(access.id ?? '') } }
+  }
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
-  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
   const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
   }))
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, repository, host, account: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

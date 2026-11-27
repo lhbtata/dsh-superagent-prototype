@@ -15,13 +15,21 @@ function packaged(...parts: string[]): { path: string; text: string } {
   if (!text.trim()) throw new Error(`Empty packaged file: ${path}`)
   return { path, text }
 }
+/**
+ * Reads one bundled Source skill.
+ * A Source skill that this build does not ship, or whose file is unreadable, yields an empty skill instead of stopping the application, because an installation may enable only some Sources.
+ */
 function load(name: string) {
-  const { path, text } = packaged('skills', `dsh-superagent-${name}`, 'SKILL.md')
-  const match = /^---\nname: ([^\n]+)\ndescription: ([^\n]+)\n---\n\n([\s\S]*)$/.exec(text)
-  if (!match) throw new Error(`Invalid packaged skill: ${path}`)
-  return { name: match[1]!, description: match[2]!, content: match[3]!, path }
+  try {
+    const { path, text } = packaged('skills', `dsh-superagent-${name}`, 'SKILL.md')
+    const match = /^---\nname: ([^\n]+)\ndescription: ([^\n]+)\n---\n\n([\s\S]*)$/.exec(text)
+    if (!match) throw new Error(`Invalid packaged skill: ${path}`)
+    return { name: match[1]!, description: match[2]!, content: match[3]!, path }
+  } catch {
+    return { name, description: '', content: '', path: '' }
+  }
 }
-export const bundledSkills = { feishu: load('feishu'), github: load('github') }
+export const bundledSkills = { feishu: load('feishu'), github: load('github'), codeup: load('codeup') }
 /**
  * Loads a built-in prompt file (`prompts/<name>.md`). Source `.md` files are written one sentence per line for
  * readable diffs; `promptFile` joins lines within each paragraph with spaces while keeping blank-line paragraph breaks.

@@ -263,7 +263,10 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
-        body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+        // Only a GitHub deployment exposes a repository path to read; a Codeup trigger proceeds without that file content.
+        body = this.host.deployment.host === 'github'
+          ? await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+          : `No repository file is available: this deployment targets ${this.host.deployment.host}, which has no readable repository path here.`
       }
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)
