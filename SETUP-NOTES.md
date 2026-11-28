@@ -468,7 +468,7 @@ GET /repos/lhbtata/superagent-sandbox/rulesets                → 403
 
 - 包装脚本 `/home/ps/.local/bin/superagent-selfmerge-watch-run`（chmod 755）负责三件事：
   1. **保证 GitHub 通路**：本机 /etc/hosts 把 github.com 系域名劫持到 127.0.0.1，靠 Watt Toolkit 加速器监听 0.0.0.0:443 提供 TLS。加速器不在时自动用 `systemd-run --user --unit=watt-toolkit` 拉起 GUI（**加速器模块 `Steam++.Accelerator` 单独跑会以 exit 161 退出，必须由 Steam++ GUI 拉起**），DISPLAY/XAUTHORITY 从 gnome-shell 进程环境动态取；拉不起来就记 ERROR 并等下一轮。
-  2. **并发互斥**：`flock` 锁 `/home/ps/.local/state/superagent/selfmerge-watch.lock`。
+  2. **并发互斥**：`flock -n` 锁 `/home/ps/.local/state/superagent/selfmerge-watch.lock`；抢不到锁（说明另一个执行者正在跑）时记 `skip 另一个执行者正在跑（flock 互斥，本轮跳过）` 并**以 rc=0 退出**，不会被当成故障。
   3. **留痕**：每轮结果追加到 `/home/ps/.local/state/superagent/selfmerge-watch.log`（`no_new …` / `alert_sent pr=N` / `ERROR …`）。
 - 启用与自查：
   - `systemctl --user enable --now superagent-selfmerge-watch.timer`
