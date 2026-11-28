@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""codeup —— 阿里云效（Codeup）的极简命令行客户端（CLI shim）。
+
+只使用 Python 3 标准库，为上层 TypeScript 程序暴露一套稳定的 HTTP 接口：
+    codeup api user
+    codeup api repos/<owner>/<name>
+    codeup api <path> [--query k=v]... [--method METHOD] [--field k=v]... [--json '<json>'] [--raw]
+    codeup auth status
+工程约束：不引入第三方依赖；任何日志/错误/异常里都不出现 token 明文（脱敏成 ***）；
+退出码 0 成功 / 1 运行、认证、HTTP 错误 / 2 用法错误。
+"""
+import argparse
+import json
+import os
+import re
+import socket
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+EXIT_OK = 0            # 成功
+EXIT_ERROR = 1         # 运行 / 认证 / HTTP 错误
+EXIT_USAGE = 2         # 用法错误
+DEFAULT_CONFIG_PATH = "~/.config/codeup-agent/config.json"
+DEFAULT_TIMEOUT = 30.0
+TOKEN_HEADER = "x-yunxiao-token"
+USER_AGENT = "codeup-agent/1.0"
+# 云效个人访问令牌形如 pt-xxxxxxxx，兜底把这类串脱敏，避免任何路径漏出明文
+TOKEN_PATTERN = re.compile(r"pt-[A-Za-z0-9_\-]{4,}")
+# 仓库权限字段候选名（不同版本返回结构不完全一致，逐个回退）
+PERM_PUSH_KEYS = ("push", "canPush", "hasPushPermission", "pushPermission", "write")
+PERM_PULL_KEYS = ("pull", "canPull", "hasPullPermission", "pullPermission", "read")
+
+class CodeupError(Exception):
+    """运行期错误（缺配置 / 认证 / 网络 / HTTP）：退出码 1，stderr 输出 error JSON。"""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+class UsageError(Exception):
+    """用法错误：退出码 2。"""
+
+def mask_text(text, token=None):
+    """把文本里的 token 明文替换成 ***，返回脱敏后的字符串。"""
+    if not text:
+        return text
+    for secret in (token, os.environ.get("CODEUP_TOKEN"), os.environ.get("YUNXIAO_PERSONAL_TOKEN")):
+        if secret and secret in text:
+            text = text.replace(secret, "***")
+    return TOKEN_PATTERN.sub("***", text)
+
+class Config(object):
+    """一次运行内解析出来的有效配置。"""
+
+    def __init__(self):
+        self.config_path = ""
+        self.domain = self.token = self.organization_id = ""
+        self.repository_id = self.owner = self.repository = ""
+        self.base_url = ""
+        self.timeout = DEFAULT_TIMEOUT
+
+def read_timeout():
+    """读取 CODEUP_TIMEOUT（秒），非法值退回默认 30 秒。"""
+    raw = os.environ.get("CODEUP_TIMEOUT")
+    try:
+        value = float(raw) if raw else DEFAULT_TIMEOUT
+    except ValueError:
+        value = DEFAULT_TIMEOUT
+    return value if value > 0 else DEFAULT_TIMEOUT
+
+def load_config(require_token=True, require_domain=True):
+    """按「环境变量 > 配置文件」的优先级组装配置。
+    环境变量：CODEUP_BASE_URL / CODEUP_DOMAIN / CODEUP_TOKEN /
+              CODEUP_ORGANIZATION_ID / CODEUP_REPOSITORY_ID / CODEUP_CONFIG
+    配置文件：CODEUP_CONFIG 指定路径，否则 ~/.config/codeup-agent/config.json
+    """
+    config_path = os.environ.get("CODEUP_CONFIG") or os.path.expanduser(DEFAULT_CONFIG_PATH)
+    data = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except ValueError as exc:
+            raise CodeupError("配置文件不是合法 JSON：%s（%s）" % (config_path, exc))
+        except OSError as exc:
+            raise CodeupError("读取配置文件失败：%s（%s）" % (config_path, exc))
+        if not isinstance(data, dict):
+            raise CodeupError("配置文件格式错误：%s（顶层应为 JSON 对象）" % config_path)
+
+    cfg = Config()
+    cfg.config_path = config_path
+    cfg.domain = str(os.environ.get("CODEUP_DOMAIN") or data.get("domain") or "").strip()
+    # token：CODEUP_TOKEN 优先，YUNXIAO_PERSONAL_TOKEN 作为兼容别名，最后才读配置文件
+    cfg.token = str(os.environ.get("CODEUP_TOKEN") or os.environ.get("YUNXIAO_PERSONAL_TOKEN")
+                    or data.get("token") or "").strip()
+    cfg.organization_id = str(os.environ.get("CODEUP_ORGANIZATION_ID") or data.get("organizationId") or "").strip()
+    cfg.repository_id = str(os.environ.get("CODEUP_REPOSITORY_ID") or data.get("repositoryId") or "").strip()
+    cfg.owner = str(data.get("owner") or "").strip()
+    cfg.repository = str(data.get("repository") or "").strip()
+    # 基址：CODEUP_BASE_URL 优先（测试用），否则 https://{domain}
+    base_url = str(os.environ.get("CODEUP_BASE_URL") or "").strip()
+    if not base_url and cfg.domain:
+        base_url = "https://" + cfg.domain
+    cfg.base_url = base_url.rstrip("/")
+    if not cfg.domain and cfg.base_url:
+        cfg.domain = urllib.parse.urlsplit(cfg.base_url).netloc
+    cfg.timeout = read_timeout()
+    if require_token and not cfg.token:
+        raise CodeupError("缺少 token：未在配置文件 %s 中找到 token 字段，"
+                          "也未设置 CODEUP_TOKEN 环境变量。" % config_path)
+    if require_domain and not cfg.base_url:
+        raise CodeupError("缺少 domain：未在配置文件 %s 中找到 domain 字段，"
+                          "也未设置 CODEUP_DOMAIN 或 CODEUP_BASE_URL 环境变量。" % config_path)
+    return cfg
+
+def http_request(cfg, url, method="GET", body=None):
+    """发起一次云效 HTTP 请求，返回 (status, 原始响应体 bytes)。"""
+    data = None
+    headers = {TOKEN_HEADER: cfg.token, "Accept": "application/json", "User-Agent": USER_AGENT}
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=cfg.timeout) as response:
+            raw = response.read()
+            return getattr(response, "status", None) or response.getcode(), raw
+    except urllib.error.HTTPError as exc:
+        # HTTP >= 400：读取响应体作为错误信息
+        try:
+            payload = exc.read()
+        except Exception:  # 读取失败不影响错误上报
+            payload = b""
+        message = payload.decode("utf-8", "replace").strip() or "HTTP %s %s" % (exc.code, exc.reason)
+        if len(message) > 2000:
+            message = message[:2000] + "…"
+        raise CodeupError(mask_text(message, cfg.token), exc.code)
+    except urllib.error.URLError as exc:
+        raise CodeupError("网络请求失败：%s" % mask_text(str(getattr(exc, "reason", exc)), cfg.token))
+    except socket.timeout:
+        raise CodeupError("网络请求超时（%s 秒）" % cfg.timeout)
+    except OSError as exc:
+        raise CodeupError("网络请求失败：%s" % mask_text(str(exc), cfg.token))
+
+def emit_error(message, status=None):
+    """按契约把错误写成 stderr 上的 JSON：{"error": {"status": ..., "message": ...}}。"""
+    sys.stderr.write(json.dumps({"error": {"status": status, "message": message}},
+                                ensure_ascii=False) + "\n")
+
+def print_json(payload):
+    """把对象以 JSON 写到 stdout（人类可读格式，ensure_ascii=False 保留中文）。"""
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+def parse_pairs(items):
+    """把 ["k=v", ...] 按第一个 = 切分成 (key, value) 列表。"""
+    pairs = []
+    for item in items:
+        key, _, value = item.partition("=")
+        pairs.append((key, value))
+    return pairs
+
+def encode_path(path):
+    """路径原样保留 ASCII 与保留字符，仅对空白与非 ASCII 做百分号编码。"""
+    return "".join(char if (char.isascii() and char not in " \t\r\n")
+                    else urllib.parse.quote(char, safe="") for char in path)
+
+def build_url(cfg, path, query_pairs):
+    """拼装 URL：以 /oapi/ 或 /api/ 开头则原样使用，否则补 /oapi/v1/codeup/ 前缀。"""
+    if path.startswith("/oapi/") or path.startswith("/api/"):
+        api_path = path
+    else:
+        api_path = "/oapi/v1/codeup/" + path.lstrip("/")
+    url = cfg.base_url + encode_path(api_path)
+    if query_pairs:
+        query = "&".join("%s=%s" % (urllib.parse.quote(str(k), safe=""),
+                                     urllib.parse.quote(str(v), safe="")) for k, v in query_pairs)
+        url += ("&" if "?" in url else "?") + query
+    return url
+
+def build_body(args, method):
+    """组装 JSON body：--json 打底，--field 覆盖同名字段；GET/HEAD/DELETE 不带 body。"""
+    if method in ("GET", "HEAD", "DELETE"):
+        return None
+    body, has_body = {}, False
+    if args.json_body is not None:
+        try:
+            parsed = json.loads(args.json_body)
+        except ValueError as exc:
+            raise UsageError("--json 不是合法 JSON：%s" % exc)
+        if not isinstance(parsed, dict):
+            raise UsageError("--json 必须是 JSON 对象")
+        body.update(parsed)
+        has_body = True
+    for key, value in parse_pairs(args.field):
+        body[key] = value
+        has_body = True
+    return body if has_body else None
+
+def first_bool(source, keys):
+    """从字典里按候选键名取出第一个布尔值。"""
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        if isinstance(value, int):
+            return bool(value)
+    return None
+
+def pick(data, keys):
+    """按候选键名取第一个非空字符串值。"""
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+def fetch_platform_user(cfg):
+    """GET {base}/oapi/v1/platform/user，返回规范化后的用户对象。"""
+    url = cfg.base_url + "/oapi/v1/platform/user"
+    status, raw = http_request(cfg, url, "GET", None)
+    text = raw.decode("utf-8", "replace")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise CodeupError("响应不是合法 JSON：%s" % mask_text(text[:200], cfg.token), status)
+    if not isinstance(data, dict):
+        raise CodeupError("响应不是 JSON 对象", status)
+    # 补齐 login：接口没返回时用 name / username 兜底
+    data["login"] = data.get("login") or pick(data, ("name", "username", "nickName", "displayName"))
+    # 补齐 id：接口没返回时用 userId 兜底，都没有则给空串（契约要求 id 存在）
+    data["id"] = data.get("id") if data.get("id") not in (None, "") else pick(data, ("userId", "user_id"))
+    return data
+
+def extract_items(text):
+    """从仓库列表响应里取出条目数组（兼容直接返回数组或包在对象里的情况）。"""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("repositories", "result", "items", "data", "list"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+def repository_matches(item, name):
+    """判断某个仓库条目是否匹配目标短名。"""
+    if not isinstance(item, dict):
+        return False
+    candidates = (item.get("name"), item.get("shortName"), item.get("path"),
+                  item.get("pathWithNamespace"), item.get("webUrl"))
+    for value in candidates:
+        if not isinstance(value, str) or not value:
+            continue
+        if value == name or value.endswith("/" + name) or value.rstrip("/").split("/")[-1] == name:
+            return True
+    return False
+
+def extract_permissions(item):
+    """从仓库条目里提取 push/pull 权限，返回 (push, pull, 来源标记)。"""
+    push = pull = None
+    if isinstance(item, dict):
+        permissions = item.get("permissions")
+        if isinstance(permissions, dict):
+            push = first_bool(permissions, PERM_PUSH_KEYS)
+            pull = first_bool(permissions, PERM_PULL_KEYS)
+        if push is None:
+            push = first_bool(item, PERM_PUSH_KEYS)
+        if pull is None:
+            pull = first_bool(item, PERM_PULL_KEYS)
+    # 接口没给权限信息：默认放行（配置里的仓库本就属于当前账号）并标记来源
+    source = "api" if push is not None and pull is not None else "default"
+    return (bool(push) if push is not None else True,
+            bool(pull) if pull is not None else True, source)
+
+def find_repository(cfg, name):
+    """按短名查询组织下的仓库；配置里已有 repositoryId 时直接用它，不必再查。"""
+    if not cfg.organization_id:
+        if cfg.repository_id:
+            return {}
+        raise CodeupError("缺少 organizationId：请在配置文件 %s 中设置 organizationId"
+                          "（或设置 CODEUP_ORGANIZATION_ID 环境变量）。" % cfg.config_path)
+    url = "%s/oapi/v1/codeup/organizations/%s/repositories?name=%s" % (
+        cfg.base_url, urllib.parse.quote(cfg.organization_id, safe=""), urllib.parse.quote(name, safe=""))
+    status, raw = http_request(cfg, url, "GET", None)
+    for item in extract_items(raw.decode("utf-8", "replace")):
+        if repository_matches(item, name):
+            return item
+    if cfg.repository_id:
+        return {}
+    raise CodeupError("未找到名为 %s 的仓库（organizationId=%s）。" % (name, cfg.organization_id), status)
+
+def cmd_api(args):
+    """codeup api ... —— 三个形态：user / repos/<owner>/<name> / 通用 REST 透传。"""
+    path = "/".join(args.path)
+    if path == "user":
+        print_json(fetch_platform_user(load_config()))
+        return EXIT_OK
+    if path.startswith("repos/"):
+        return cmd_api_repos(path[len("repos/"):])
+    return cmd_api_generic(path, args)
+
+def cmd_api_repos(rest):
+    """codeup api repos/<owner>/<name> —— 返回仓库信息与 push/pull 权限。"""
+    cfg = load_config()
+    owner, _, name = rest.rpartition("/")
+    owner = owner.strip("/")
+    if not owner or not name:
+        raise UsageError("用法：codeup api repos/<owner>/<name>")
+    item = find_repository(cfg, name)
+    output = dict(item) if isinstance(item, dict) else {}
+    output["full_name"] = "%s/%s" % (owner, name)
+    output["id"] = str(cfg.repository_id or output.get("id") or "")
+    push, pull, source = extract_permissions(item)
+    output["permissions"] = {"push": push, "pull": pull}
+    output["permissionSource"] = source
+    print_json(output)
+    return EXIT_OK
+
+def cmd_api_generic(path, args):
+    """codeup api <path> ... —— 通用 REST 透传，stdout 原样输出响应体。"""
+    cfg = load_config()
+    method = (args.method or "GET").upper()
+    url = build_url(cfg, path, parse_pairs(args.query))
+    body = build_body(args, method)
+    _, raw = http_request(cfg, url, method, body)
+    text = raw.decode("utf-8", "replace")
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return EXIT_OK
+
+def cmd_auth(args):
+    """codeup auth status —— 报告登录态；绝不输出 token 本身。"""
+    if args.auth_command != "status":
+        raise UsageError("用法：codeup auth status")
+    cfg = load_config(require_token=False, require_domain=False)
+    if not cfg.token:
+        print_json({"loggedIn": False, "login": "", "domain": cfg.domain})
+        raise CodeupError("缺少 token：未在配置文件 %s 中找到 token 字段，"
+                          "也未设置 CODEUP_TOKEN 环境变量。" % cfg.config_path)
+    try:
+        user = fetch_platform_user(cfg)
+    except CodeupError:
+        print_json({"loggedIn": False, "login": "", "domain": cfg.domain})
+        raise
+    print_json({"loggedIn": True, "login": user.get("login", ""), "domain": cfg.domain})
+    return EXIT_OK
+
+class ChineseParser(argparse.ArgumentParser):
+    """出错时输出中文提示并以退出码 2 结束（用法错误）。"""
+
+    # 把 argparse 的英文提示翻成中文，便于上层直接展示
+    TRANSLATIONS = (
+        ("the following arguments are required:", "缺少必需参数："),
+        ("invalid choice:", "非法取值："),
+        ("unrecognized arguments:", "无法识别的参数："),
+        ("argument path:", "参数 path："),
+        ("ambiguous option:", "有歧义的选项："),
+    )
+
+    def error(self, message):
+        for source, target in self.TRANSLATIONS:
+            message = message.replace(source, target)
+        sys.stderr.write("用法错误：%s\n" % message)
+        self.print_usage(sys.stderr)
+        sys.exit(EXIT_USAGE)
+
+def build_parser():
+    """构造 argparse 解析器：api / auth 两个子命令。"""
+    parser = ChineseParser(prog="codeup",
+                           description="阿里云效 Codeup 的极简命令行客户端（仅标准库实现）")
+    sub = parser.add_subparsers(dest="command")
+    api = sub.add_parser("api", help="调用云效 REST 接口")
+    api.add_argument("path", nargs="+", help="接口路径：user、repos/<owner>/<name> 或任意相对路径")
+    api.add_argument("--query", action="append", default=[], metavar="K=V", help="查询参数，可重复")
+    api.add_argument("--method", default="GET", help="HTTP 方法，默认 GET")
+    api.add_argument("--field", action="append", default=[], metavar="K=V", help="JSON body 字段，可重复")
+    api.add_argument("--json", dest="json_body", default=None, help="JSON 字符串，作为 body 的基础")
+    api.add_argument("--raw", action="store_true", help="直接输出响应体原文（默认行为，保留兼容）")
+    auth = sub.add_parser("auth", help="认证相关命令")
+    auth.add_argument("auth_command", nargs="?", choices=["status"], help="目前仅支持 status")
+    return parser
+
+def main(argv=None):
+    """入口：把异常翻译成契约规定的退出码与 stderr JSON。"""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:  # argparse 已打印提示
+        return int(exc.code) if exc.code is not None else EXIT_OK
+    try:
+        if args.command == "api":
+            return cmd_api(args)
+        if args.command == "auth":
+            return cmd_auth(args)
+        raise UsageError("缺少子命令，可用子命令：api、auth")
+    except UsageError as exc:
+        emit_error("用法错误：%s" % exc)
+        return EXIT_USAGE
+    except CodeupError as exc:
+        emit_error(exc.message, exc.status)
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        emit_error("操作被中断")
+        return EXIT_ERROR
+    except Exception as exc:  # 兜底：任何异常都不允许带出 token 明文
+        emit_error("内部错误：%s" % mask_text(str(exc)))
+        return EXIT_ERROR
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -317,11 +317,11 @@ export class Sessions {
     previous?.dispose()
     const disposers: (() => void)[] = []
     for (const [name, content] of this.host.prompts.skills(version.config)) {
-      const bundled = name === 'feishu' || name === 'github' ? bundledSkills[name] : undefined
+      const bundled = name === 'feishu' || name === 'github' || name === 'codeup' ? bundledSkills[name] : undefined
       const body = version.config.skills[name] ?? ''
       const description = bundled?.description ?? (body.replace(/\s+/g, ' ').slice(0, 120) || 'Custom dsh-superagent operational skill.')
       disposers.push(scope.skills.register({ name: `${SKILL_PREFIX}${name}`, description, content, source: 'runtime',
-        ...(bundled ? { resourceBase: { kind: 'directory' as const, path: dirname(bundled.path) } } : {}) }))
+        ...(bundled?.path ? { resourceBase: { kind: 'directory' as const, path: dirname(bundled.path) } } : {}) }))
     }
     binding.skills = { revision: version.revision, dispose: () => { disposers.forEach(dispose => dispose()) } }
   }

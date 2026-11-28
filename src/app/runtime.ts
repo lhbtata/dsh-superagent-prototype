@@ -81,7 +81,7 @@ export class Runtime extends Service implements SourceHost {
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
-  private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly toolHost: MainToolsHost & ExecutorToolsHost & { readonly codeup: SourceContext }
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -100,7 +100,9 @@ export class Runtime extends Service implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      // The Codeup skill is loaded only while its Source is installed and enabled, so its variables are declared with it.
+      const codeup = () => this.sources.instance('codeup')?.enabled === true
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu, codeup)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
@@ -161,6 +163,8 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        // The Codeup Source ships disabled, so this context stays safe to touch while the kind is absent: its health entries resolve to no-ops and its config reads as undefined.
+        get codeup() { return runtime.context({ kind: 'codeup', health: ['codeup'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()

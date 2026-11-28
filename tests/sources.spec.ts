@@ -1066,6 +1066,14 @@ describe('feishu event consumer', () => {
     const store = new Store(join(dir, 'db.sqlite'))
     store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: true, config } } }))
     const board = new HealthBoard()
+    // The consumer reports the malformed line, and the readiness signal may reach the board after it; the reports are
+    // kept, so the test can see that the error was reported even when a later report replaced the entry.
+    const written: { name: string; state: string; detail: string }[] = []
+    const claim = board.claim.bind(board)
+    board.claim = (name: string, initial?: Parameters<typeof claim>[1]) => {
+      const entry = claim(name, initial)
+      return { ...entry, set: health => { written.push({ name, state: health.state, detail: health.detail }); entry.set(health) } }
+    }
     const sources = new SourceRegistry(() => store.settings(), board)
     sources.register(feishuKind)
     const assessor: Assessor = { request: vi.fn(async () => {}) }
@@ -1079,7 +1087,7 @@ describe('feishu event consumer', () => {
     const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
       receive: (trigger: Trigger) => engine.receive(trigger) }
     const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
-    return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
+    return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff, written }
   }
 
   /** A message event line as `event consume` prints it; a group message mentions the bot. */
@@ -1089,12 +1097,14 @@ describe('feishu event consumer', () => {
   it('takes in the event lines it reads, records each chat as direct or not, and reports a malformed line without stopping', async () => {
     writeFileSync(join(dir, 'events'), [event('om_1', 'oc_group', 'group'), event('om_2', 'oc_dm', 'p2p'), 'not json',
       event('om_3', 'oc_group', 'group')].join('\n') + '\n')
-    const { ctx, health, store } = consumerSource(cli('events'))
+    const { ctx, health, store, written } = consumerSource(cli('events'))
     running = runFeishu(ctx, controller.signal)
     await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_3'))).toBeDefined(), until)
     expect(['om_1', 'om_2'].map(id => store.triggers.get(feishuTriggerId(id))?.meta.direct)).toEqual([false, true])
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
-    expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    // The malformed line is reported as an error; the consumer keeps reading, which the next event shows.
+    expect(written.some(report => report.name === 'feishu' && report.state === 'error' && report.detail.includes('JSON'))).toBe(true)
+    expect(health.feishu?.state).toBeDefined()
     controller.abort(); await running; store.close()
   }, 20_000)
   it('drops the events it reads once the Source is off', async () => {
