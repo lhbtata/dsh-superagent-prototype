@@ -455,8 +455,28 @@ GET /repos/lhbtata/superagent-sandbox/rulesets                → 403
   - 用**操作者**账号的 `gh` 拉 `repos/lhbtata/superagent-sandbox/pulls?state=closed`，对每个已合并 PR 再取详情，读 `merged_by.login`，筛出 `== lhbtata-superagent` 的。
   - 已告警记录（`number:merged_at`）存 `/home/ps/.local/state/superagent/selfmerge-alerted.json`；**首次运行只建基线不发告警**（避免把历史 PR #3 当成新事件）。
   - 新增项由脚本自己用 **Super-agent bot**（`/home/ps/.local/bin/lark-bot im +messages-send --chat-id oc_167db7fc1fc970bcf8716e2616f1a3a6 --markdown … --as bot --idempotency-key …`）发到群「dsh-agent组1」，文案里注明「若是你本人用 agent 账号登录态点的合并属预期」。
-- 定时任务：`schedule-1f91ec15-104f-44d4-88c0-50a363cd1b33`（rrule `FREQ=MINUTELY;INTERVAL=30`，target `new_once`，会话 `session-4cbb14e5-4022-4c7a-bbcb-ed4e76ec9de4`）—— 每 30 分钟在新会话里跑一次脚本。
 - 手工查一次：`/home/ps/.local/bin/superagent-selfmerge-watch`，输出 `baseline …` / `no_new …` / `alerted N 条 …` / `ERROR …`。
+
+#### 12.3.1 2026-11-28 恢复与加固（原来的 DSH 定时任务被删了）
+
+原来的 DSH 定时任务 `schedule-1f91ec15-104f-44d4-88c0-50a363cd1b33` 在会话外被删除，监控一度静默缺失。现改为**双保险**，主执行者不再是 DSH 调度：
+
+| 层 | 机制 | 说明 |
+|---|---|---|
+| 主 | **systemd --user 定时器** `superagent-selfmerge-watch.timer` | `OnCalendar=*-*-* *:00,30:00` + `Persistent=true`（关机错过的周期开机后补跑）；单元 `superagent-selfmerge-watch.service`（Type=oneshot）执行包装脚本。**不依赖 DSH 会话，不会被会话作用域拆除带走** |
+| 副 | DSH 定时任务 `schedule-fdf6ee66-2db5-4d9a-8d09-d576132eb117` | rrule `FREQ=MINUTELY;INTERVAL=30`、target `new_once`、专用会话 `session-0718947e-62eb-420a-bdc4-84bb381763fc`；与主执行者共用同一份已告警状态文件，且包装脚本用 `flock` 互斥，**不会重复发告警** |
+
+- 包装脚本 `/home/ps/.local/bin/superagent-selfmerge-watch-run`（chmod 755）负责三件事：
+  1. **保证 GitHub 通路**：本机 /etc/hosts 把 github.com 系域名劫持到 127.0.0.1，靠 Watt Toolkit 加速器监听 0.0.0.0:443 提供 TLS。加速器不在时自动用 `systemd-run --user --unit=watt-toolkit` 拉起 GUI（**加速器模块 `Steam++.Accelerator` 单独跑会以 exit 161 退出，必须由 Steam++ GUI 拉起**），DISPLAY/XAUTHORITY 从 gnome-shell 进程环境动态取；拉不起来就记 ERROR 并等下一轮。
+  2. **并发互斥**：`flock` 锁 `/home/ps/.local/state/superagent/selfmerge-watch.lock`。
+  3. **留痕**：每轮结果追加到 `/home/ps/.local/state/superagent/selfmerge-watch.log`（`no_new …` / `alert_sent pr=N` / `ERROR …`）。
+- 启用与自查：
+  - `systemctl --user enable --now superagent-selfmerge-watch.timer`
+  - `systemctl --user list-timers superagent-selfmerge-watch.timer`（看 NEXT/LAST）
+  - `systemctl --user start superagent-selfmerge-watch.service`（立刻跑一轮）
+  - `journalctl --user -u superagent-selfmerge-watch.service -n 20 --no-pager`
+  - `tail -f /home/ps/.local/state/superagent/selfmerge-watch.log`
+- 2026-11-28 验收：手工触发一轮 → `no_new self_merged_total=1`；清空基线后再触发 → `alert_sent pr=3` + 飞书群「dsh-agent组1」确认收到消息（message_id `om_x100b7f9708b760b4de033a611a82cd6`，发送方 app_id `cli_ab8c1481eba39d1c` / bot `ou_9e4c73b1e5c096278531569d9fa4a64d`），随后状态文件自动重新登记 PR #3，不会重复告警。
 
 ### 12.4 待办：Policy 明规则
 
@@ -465,3 +485,46 @@ GET /repos/lhbtata/superagent-sandbox/rulesets                → 403
 ### 12.5 人工纪律
 
 合并 PR 时**用 `lhbtata` 账号的浏览器会话**操作，避免 `merged_by` 被记成 agent 账号混淆审计（PR #3 就是这么产生的）。
+
+## 13. 实例被连带 SIGKILL 事故与加固（2026-11-28）
+
+### 13.1 现象与根因
+
+2026-11-28 上午面板 3082 打不开。**不是重启、不是 OOM、不是配置被改坏**，而是 **DSH 会话作用域被拆，连带 SIGKILL**：
+
+```
+/var/log/syslog  2026-11-28T09:13:35  (systemd user manager pid 4350)
+dsh-subprocess-2307183-44ad2a965a14.scope: Sending signal SIGKILL to process 3257547 (tmux: server) on client request.
+dsh-subprocess-2307183-3c0e78ee0d54.scope: Sending signal SIGKILL to process 3410323 (Steam++) on client request.
+dsh-subprocess-2307183-3c0e78ee0d54.scope: Sending signal SIGKILL to process 3410508 (Steam++.Acceler) on client request.
+```
+
+同一瞬间一个 DSH subprocess scope 被终止，systemd 清扫它整个 cgroup，三样东西一起死：
+
+- **tmux server** → superagent 实例原本跑在 tmux 会话 `dsh-superagent` 里 → 跟着没；
+- **Watt Toolkit 主程序 + 加速器** → 本机 GitHub 的 HTTPS 通路（/etc/hosts 把 github.com / api.github.com 等 40+ 域名指到 127.0.0.1，靠加速器监听 0.0.0.0:443 提供 TLS）→ 加速器一死，GitHub 全部 `dial tcp 127.0.0.1:443: connection refused` → 面板 setup 报 `agentCliSignedOut`。
+
+排除项：uptime 7 周（没重启）、syslog/kern.log 无 oom-kill、无 root crontab/systemd timer 动过它。
+
+### 13.2 加固：改用 systemd --user 单元
+
+实例不再挂在 DSH 会话的 tmux 上，改为独立的用户级 systemd 单元，**会话作用域再被拆也带不走它**：
+
+```bash
+systemd-run --user --unit=dsh-superagent --collect \
+  --property=Restart=on-failure --property=RestartSec=5 \
+  --property=SuccessExitStatus=130 --property=UMask=0077 --property=KillMode=mixed \
+  --working-directory=/home/ps/src/dsh-superagent-prototype \
+  /bin/bash -c "umask 077; exec '<dsh>' --profile superagent --no-open >> '<log>' 2>&1"
+```
+
+- `SuccessExitStatus=130`：仓库脚本 `stop` 发的是 SIGINT（退出码 130），把它列为成功状态，Restart 就不会把刚停掉的实例拉回来。
+- 仓库脚本 `status` / `stop` 按命令行参数识别进程，所以对这种启动方式依旧可用（`scripts/dsh-superagent status --profile superagent` 正常返回 pids 与 health）。
+- 停：`systemctl --user stop dsh-superagent`；看日志：`journalctl --user -u dsh-superagent -n 50 --no-pager`。
+- Watt Toolkit 同样用 `systemd-run --user --unit=watt-toolkit --collect --setenv=DISPLAY=:1 --setenv=XAUTHORITY=/run/user/1000/gdm/Xauthority …` 起 GUI（**加速器模块必须由 GUI 拉起**）。
+- 恢复顺序：先起 Watt Toolkit（保证 GitHub 通路）→ 再起 superagent → `POST /orchestrator/api/setup/check` 刷新 setup 判定（GitHub 通路恢复后必须触发一次，否则 setup 会保留 `agentCliSignedOut`）。
+
+### 13.3 遗留
+
+- `dsh-superagent.service` / `watt-toolkit.service` 目前都是 **transient 单元**（进程退出即消失、无开机自启）。要开机自启可落成 `~/.config/systemd/user/*.service` 永久单元（`Restart=always` + `WantedBy=default.target`）。
+- 自合并侦测已改由 systemd 定时器执行，见 §12.3.1。
