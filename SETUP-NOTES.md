@@ -565,3 +565,13 @@ systemd-run --user --unit=dsh-superagent --collect \
 - GitHub 靶场的 PR #4（`lhbtata/superagent-sandbox`）还没合并，部署没有指定合并用的 CLI，所以由人合并；切换后实例不再看 GitHub，那个工单不会因为合并而自动关闭，需要人工收尾。
 - 宿主没有 GitHub 写权限，`lhbtata/dsh-superagent-prototype` 上这批 Codeup 改动只落在本机工作区（分支 `feat/codeup-source`），推不上去。
 
+### 14.5 这次切换是怎么执行的
+
+切换要重启实例，而重启会打断发起重启的那个 agent turn，所以切换本身跑在工单目录下的脚本里
+（`switch-to-codeup.sh` + `switch_apply.py`，由 systemd 用户单元 `superagent-switch-codeup` 跑），
+工单则由重启后自动恢复的 worker 接手收尾并汇报。工单目录里留了 `SWITCH-NOTES.md` 写明状态、脚本和手工兜底步骤。
+
+两条重启的区别要记住：**插件重启只重跑 setup，不重新 import 模块**，所以改了 `src/` 里的代码必须
+**进程重启**（`systemctl --user restart dsh-superagent`）才生效；实例是 `--collect` 的 transient 单元，
+`restart` 之后如果单元没回来，就照 §13.2 的 `systemd-run` 命令重新拉起。
+
