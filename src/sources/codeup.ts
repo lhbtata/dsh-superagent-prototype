@@ -215,7 +215,8 @@ async function pollChangeRequests(ctx: SourceContext, round: Round, config: Code
       'state=opened',
       'orderBy=created_at',
       'sort=asc',
-      `createdAfter=${encodeURIComponent(since)}`,
+      // The CLI percent-encodes every query value itself; a pre-encoded value would be encoded twice.
+      `createdAfter=${since}`,
     ]
     try {
       const requests = await readChangeRequests(commands, query)

@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Commands, CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
-import { CodeupConfigSchema, codeupKind } from '../src/sources/codeup.ts'
+import { CodeupConfigSchema, codeupKind, pollRound } from '../src/sources/codeup.ts'
 import { codeupAccountName, codeupDescription, CodeupChangeRequestSchema, isAgentAccount } from '../src/sources/codeup-trigger.ts'
 import { codeupThreadContext, readCodeup } from '../src/sources/codeup-read.ts'
 import { agentChangeRequest, codeupPage } from '../src/sources/codeup-pull.ts'
@@ -88,4 +88,24 @@ it('reports a change request that is gone as gone', async () => {
 
 it('links to the page of a change request', () => {
   expect(codeupPage('63156676050e9c4a07a96998/xuanjiAPP', 7)).toBe('https://codeup.aliyun.com/63156676050e9c4a07a96998/xuanjiAPP/change/7')
+})
+
+it('asks for the change requests with a date the API accepts, encoded once', async () => {
+  const pages = vi.spyOn(commands, 'codeupPages').mockResolvedValue([])
+  const context = {
+    commands,
+    deployment,
+    config: <T>(kind: string) => (kind === 'codeup' ? CodeupConfigSchema.parse({}) : undefined) as T,
+    state: { get: () => undefined, set: () => {} },
+    threads: { patch: () => {}, describe: () => {} },
+    tickets: { open: () => [] },
+    receive: () => undefined,
+    report: () => {},
+  }
+  await pollRound(context as never)
+  const query = pages.mock.calls[0]?.[2] ?? []
+  const createdAfter = query.find(pair => pair.startsWith('createdAfter='))
+  expect(createdAfter).toMatch(/^createdAfter=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  expect(query).toContain('projectIds=5139698')
+  expect(query).toContain('state=opened')
 })
