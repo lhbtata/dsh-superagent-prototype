@@ -549,7 +549,8 @@ systemd-run --user --unit=dsh-superagent --collect \
 - Codeup 侧是**专用智能体账号** `lhbtata-superagent`（2026-11-28 建），个人访问令牌在 `~/.config/codeup-agent/config.json`（600），CLI 从那里读，不回写、不进日志。
 - 飞书那边担心的「自己的评论自己看不见」不存在了：操作者在 Codeup 的身份是 `lhbtata@163.com` / `aliyun:lhbtata@163.com_lpXMs`，和智能体账号不是一个。
 - 但 **git 走 SSH**：机器上的 SSH key 是操作者的，所以 push 的归属是操作者，提交作者由 worker 显式指定。
-- 成员名单（`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/members`）：`trwfff`、`lhbtata@163.com`、`hi31692333@aliyun.com`、`lhbtata-superagent`。接收名单里只放了操作者本人。
+- 成员名单（`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/members`）：`trwfff`、`lhbtata@163.com`、`hi***@aliyun.com`、`lhbtata-superagent`。接收名单里只放了操作者本人。
+- **组织角色不用再提**（2026-11-28 复核）：`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/roles` 里 `lhbtata-superagent` 的 roleId `63156676a705818587ab35f8` = **管理员**（不是「成员」）；`lhbtata@163.com` = 拥有者，其余 = 成员。仓库层面 `codeup api repos/63156676050e9c4a07a96998/xuanjiAPP` 返回 `permissions.push=true`、`accessLevel=40`，SSH 推送 `git push --dry-run` 也通。**Codeup 侧本来就能推，不需要改角色。**
 
 ### 14.3 踩坑
 
@@ -563,8 +564,12 @@ systemd-run --user --unit=dsh-superagent --collect \
 
 ### 14.4 切换后遗留
 
-- GitHub 靶场的 PR #4（`lhbtata/superagent-sandbox`）还没合并，部署没有指定合并用的 CLI，所以由人合并；切换后实例不再看 GitHub，那个工单不会因为合并而自动关闭，需要人工收尾。
-- 宿主没有 GitHub 写权限，`lhbtata/dsh-superagent-prototype` 上这批 Codeup 改动只落在本机工作区（分支 `feat/codeup-source`），推不上去。
+- GitHub 靶场的 PR #4（`lhbtata/superagent-sandbox`）已由操作者手动合并；切换后实例不再看 GitHub，那个工单不会因为合并而自动关闭，需要人工收尾。
+- ~~宿主没有 GitHub 写权限，Codeup 改动推不上去~~ —— **这条结论是错的，已于 2026-11-28 更正并处理完毕**：
+  - 真实阻塞点是 **GitHub 侧、且只针对原型仓库**：`feat/codeup-source` 这批提交要推的 `lhbtata/dsh-superagent-prototype` 是 GitHub fork，不是 Codeup。agent 账号 `lhbtata-superagent` 在该 fork 上确实只有 `pull`（`push:false`），所以**它自己推不了**。
+  - 但「宿主推不了」是另一回事：宿主上 `gh` 已登录 `lhbtata`（fork 拥有者，admin），而 git 推不了只是因为全局 `credential.helper=`（空）+ `user.useConfigOnly=true`，HTTPS 推送取不到凭证（报 `could not read Username for 'https://github.com'`），**不是权限问题**。验证：`git -c credential.helper='!gh auth git-credential' push --dry-run fork feat/codeup-source` 通过。
+  - 处置：原型仓库 `.git/config` 里本地加 `credential.helper=!gh auth git-credential`（只影响这一个仓库；提交作者仍是 worker 显式指定的 agent 账号），分支 `feat/codeup-source` 已推上 fork。
+  - 以后若要让 **agent 账号自己**推原型仓库，需要在 GitHub 把 `lhbtata-superagent` 加为该 fork 的 collaborator（push 权限）；否则继续用操作者账号推即可。宿主的两把 SSH key 都没在 GitHub 注册过（`ssh -T git@github.com` 拒绝），所以 GitHub 侧没有免密 SSH 这条路。
 
 ### 14.5 这次切换是怎么执行的
 
