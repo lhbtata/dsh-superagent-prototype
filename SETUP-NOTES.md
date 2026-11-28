@@ -550,7 +550,10 @@ systemd-run --user --unit=dsh-superagent --collect \
 - 飞书那边担心的「自己的评论自己看不见」不存在了：操作者在 Codeup 的身份是 `lhbtata@163.com` / `aliyun:lhbtata@163.com_lpXMs`，和智能体账号不是一个。
 - 但 **git 走 SSH**：机器上的 SSH key 是操作者的，所以 push 的归属是操作者，提交作者由 worker 显式指定。
 - 成员名单（`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/members`）：`trwfff`、`lhbtata@163.com`、`hi***@aliyun.com`、`lhbtata-superagent`。接收名单里只放了操作者本人。
-- **组织角色不用再提**（2026-11-28 复核）：`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/roles` 里 `lhbtata-superagent` 的 roleId `63156676a705818587ab35f8` = **管理员**（不是「成员」）；`lhbtata@163.com` = 拥有者，其余 = 成员。仓库层面 `codeup api repos/63156676050e9c4a07a96998/xuanjiAPP` 返回 `permissions.push=true`、`accessLevel=40`，SSH 推送 `git push --dry-run` 也通。**Codeup 侧本来就能推，不需要改角色。**
+- **组织角色不用再提**（2026-11-28 复核）：`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/roles` 里 `lhbtata-superagent` 的 roleId `63156676a705818587ab35f8` = **管理员**（不是「成员」）；`lhbtata@163.com` = 拥有者，其余 = 成员。
+- **但网页上看到的「开发者」也是对的——那是仓库角色，和组织角色是两套**（2026-11-28 再核）：仓库成员列表 `/oapi/v1/codeup/organizations/63156676050e9c4a07a96998/repositories/5139698/members` 里 `lhbtata-superagent` 是 `accessLevel=30`（**开发者**），操作者 `lhbtata@163.com` 是 `40`（管理者）。而 `codeup api repos/63156676050e9c4a07a96998/xuanjiAPP` 返回的 `accessLevel=40` / `permissionSource=default` 是**按组织角色算出来的有效权限**，不是那条成员记录本身——两个数不冲突，别混。
+- **30（开发者）够用**：读仓库、写普通分支、提变更请求都够；只有改仓库设置（分支保护、成员管理、删仓库）才需要 `40`。
+- **push 的身份跟这个账号无关**：git 走 SSH，宿主机那把 key 注册在**操作者**账号上（`ssh -T git@codeup.aliyun.com` → `Welcome to Codeup, lhbtata@163.com`），所以 push 归属操作者，提交作者由 worker 显式写成 agent 账号。**宿主机上不需要给 `lhbtata-superagent` 做任何 git 登录**——SSH 没有「登录」这回事，只有把公钥注册到某个账号；agent 账号在 Codeup 上的 API 身份靠它自己的个人访问令牌（`codeup api /oapi/v1/platform/user` → `lhbtata-superagent`），跟 git 无关。
 
 ### 14.3 踩坑
 
@@ -561,6 +564,7 @@ systemd-run --user --unit=dsh-superagent --collect \
 - **查询参数只能传原值**：CLI 自己会对 `--query` 的值做百分号编码，源码里再 `encodeURIComponent` 一次就成了二次编码，`createdAfter` 收到 `2026-11-28T03%3A56%3A29.144Z`，API 回 400「date format should be ISO 8601」。这条在面板上表现为 Codeup 源一直 `starting`，三次失败后才变 `error`。
 - **插件重启 ≠ 进程重启**。面板保存只重启 `dsh-superagent` 这个插件（重新跑 setup），**不会重新 import 模块**，所以改了 `src/` 里的代码必须重启进程才生效：`systemctl --user restart dsh-superagent`。
 - **worker 会话和实例不在同一个 cgroup**：worker 跑在 `dsh-subprocess-<pid>-<hash>.scope`，实例在 `dsh-superagent.service`，所以重启实例不会连带杀掉正在跑的工单；但工单和 orchestrator 都在实例进程里，实例停掉期间 `orchestrator_report` 发不出去。
+- **Codeup 仓库目前没有分支保护**（2026-11-28 查）：`/oapi/v1/codeup/organizations/<org>/repositories/<repoId>/protectedBranches` 返回 `[]`，另一个路径也报 `protected not found in project 5139698`。所以 30（开发者）的账号**能自己合并自己的变更请求**——和 GitHub 侧 §11.6 是同一个问题。要落实「必须人合并」，由操作者（40）在网页上给目标分支配保护规则（至少 1 个 approval、禁 direct push）。**别为了配规则把 agent 账号提到 40**，那只是放大爆炸半径。
 
 ### 14.4 切换后遗留
 
@@ -568,7 +572,7 @@ systemd-run --user --unit=dsh-superagent --collect \
 - ~~宿主没有 GitHub 写权限，Codeup 改动推不上去~~ —— **这条结论是错的，已于 2026-11-28 更正并处理完毕**：
   - 真实阻塞点是 **GitHub 侧、且只针对原型仓库**：`feat/codeup-source` 这批提交要推的 `lhbtata/dsh-superagent-prototype` 是 GitHub fork，不是 Codeup。agent 账号 `lhbtata-superagent` 在该 fork 上确实只有 `pull`（`push:false`），所以**它自己推不了**。
   - 但「宿主推不了」是另一回事：宿主上 `gh` 已登录 `lhbtata`（fork 拥有者，admin），而 git 推不了只是因为全局 `credential.helper=`（空）+ `user.useConfigOnly=true`，HTTPS 推送取不到凭证（报 `could not read Username for 'https://github.com'`），**不是权限问题**。验证：`git -c credential.helper='!gh auth git-credential' push --dry-run fork feat/codeup-source` 通过。
-  - 处置：原型仓库 `.git/config` 里本地加 `credential.helper=!gh auth git-credential`（只影响这一个仓库；提交作者仍是 worker 显式指定的 agent 账号），分支 `feat/codeup-source` 已推上 fork。
+  - 处置：原型仓库 `.git/config` 里本地加 `credential.helper=!gh auth git-credential`（只影响这一个仓库；提交作者仍是 worker 显式指定的 agent 账号），分支 `feat/codeup-source` 已推上 fork；PR `lhbtata/dsh-superagent-prototype#3` 已由操作者合并（merge commit `ccd4067`，2026-11-28T06:10:05Z）。
   - 以后若要让 **agent 账号自己**推原型仓库，需要在 GitHub 把 `lhbtata-superagent` 加为该 fork 的 collaborator（push 权限）；否则继续用操作者账号推即可。宿主的两把 SSH key 都没在 GitHub 注册过（`ssh -T git@github.com` 拒绝），所以 GitHub 侧没有免密 SSH 这条路。
 
 ### 14.5 这次切换是怎么执行的
