@@ -557,6 +557,7 @@ systemd-run --user --unit=dsh-superagent --collect \
 - **列表和详情的字段名不一样**：列表给 `state`/`createdAt`，详情给 `status`/`createTime`。Source 把两套名字合成一套。
 - **变更请求列表是组织级的**，仓库用 `projectIds` 查询参数指定；`state` 只认小写 `opened`/`closed`/`merged`/`all`，写成大写会被忽略并返回全部。
 - **账号 id 的正则一开始太窄**（`[A-Za-z0-9._-]+`），Codeup 的显示名是邮箱，装不下操作者的 `lhbtata@163.com`。已放宽成 `[A-Za-z0-9._:@-]{1,120}`。
+- **查询参数只能传原值**：CLI 自己会对 `--query` 的值做百分号编码，源码里再 `encodeURIComponent` 一次就成了二次编码，`createdAfter` 收到 `2026-11-28T03%3A56%3A29.144Z`，API 回 400「date format should be ISO 8601」。这条在面板上表现为 Codeup 源一直 `starting`，三次失败后才变 `error`。
 - **插件重启 ≠ 进程重启**。面板保存只重启 `dsh-superagent` 这个插件（重新跑 setup），**不会重新 import 模块**，所以改了 `src/` 里的代码必须重启进程才生效：`systemctl --user restart dsh-superagent`。
 - **worker 会话和实例不在同一个 cgroup**：worker 跑在 `dsh-subprocess-<pid>-<hash>.scope`，实例在 `dsh-superagent.service`，所以重启实例不会连带杀掉正在跑的工单；但工单和 orchestrator 都在实例进程里，实例停掉期间 `orchestrator_report` 发不出去。
 

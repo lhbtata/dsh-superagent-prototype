@@ -219,6 +219,8 @@ migration is out of scope for the pilot and is left to a person.
 
 - The `codeup` CLI has no `--jq`, `--paginate` or `--include`. Paging is done by hand with `--query page=N
   --query perPage=50`, and JSON is filtered on the TypeScript side.
+- The CLI percent-encodes every `--query` value itself, so a value must be passed as it is: a pre-encoded date
+  arrives twice encoded (`2026-11-28T03%3A56%3A29.144Z`) and the API answers 400.
 - **There is no endpoint that reads the comments of a change request.** Every variant answered 404 on 2026-11-28
   (`…/changeRequests/<id>/comments` with GET and POST, the GitLab-shaped path on `openapi-rdc`, and the web path on
   `codeup.aliyun.com`). The Source therefore reads the change request and its comment counts instead of the comments,
