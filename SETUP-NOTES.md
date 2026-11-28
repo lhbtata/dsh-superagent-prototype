@@ -528,3 +528,40 @@ systemd-run --user --unit=dsh-superagent --collect \
 
 - `dsh-superagent.service` / `watt-toolkit.service` 目前都是 **transient 单元**（进程退出即消失、无开机自启）。要开机自启可落成 `~/.config/systemd/user/*.service` 永久单元（`Restart=always` + `WantedBy=default.target`）。
 - 自合并侦测已改由 systemd 定时器执行，见 §12.3.1。
+
+## 14. 代码宿主切到 Codeup（2026-11-28）
+
+实例的代码宿主从 GitHub 靶场（`lhbtata/superagent-sandbox`）换成 Codeup 的 `63156676050e9c4a07a96998/xuanjiAPP`。飞书仍是入口，只换代码宿主。
+
+### 14.1 面板里改了什么
+
+| 块 | 改前 | 改后 |
+|---|---|---|
+| `source:codeup` | `repository` 空 | `repository=63156676050e9c4a07a96998/xuanjiAPP`、`cli=/home/ps/.local/bin/codeup`、`observeComments=false` |
+| `source:github` | `enabled`，`repository=lhbtata/superagent-sandbox` | `enabled=false`（配置留着，随时切回） |
+| `policy.sources.codeup` | 无 | `allowed=[{ id: "lhbtata@163.com" }]` |
+| `executor.prepare` | fetch GitHub 靶场 + worktree | fetch `/home/ps/src/xuanjiAPP` + worktree，基线 `release/three-app-base` |
+
+`eval.mode` 保持 `observe`：试点还没开始，Codeup 上来的请求先只记录不执行。
+
+### 14.2 账号
+
+- Codeup 侧是**专用智能体账号** `lhbtata-superagent`（2026-11-28 建），个人访问令牌在 `~/.config/codeup-agent/config.json`（600），CLI 从那里读，不回写、不进日志。
+- 飞书那边担心的「自己的评论自己看不见」不存在了：操作者在 Codeup 的身份是 `lhbtata@163.com` / `aliyun:lhbtata@163.com_lpXMs`，和智能体账号不是一个。
+- 但 **git 走 SSH**：机器上的 SSH key 是操作者的，所以 push 的归属是操作者，提交作者由 worker 显式指定。
+- 成员名单（`/oapi/v1/platform/organizations/63156676050e9c4a07a96998/members`）：`trwfff`、`lhbtata@163.com`、`hi31692333@aliyun.com`、`lhbtata-superagent`。接收名单里只放了操作者本人。
+
+### 14.3 踩坑
+
+- **Codeup OpenAPI 没有读评论的接口**。GET/POST `…/changeRequests/<id>/comments` 都是 404，GitLab 风格路径在 `openapi-rdc` 上 307、在 `codeup.aliyun.com` 上 403。所以 `observeComments` 默认关，Source 读变更请求本身和评论数；回复走 POST `content` + `comment_type=GLOBAL_COMMENT`，这条是通的。
+- **列表和详情的字段名不一样**：列表给 `state`/`createdAt`，详情给 `status`/`createTime`。Source 把两套名字合成一套。
+- **变更请求列表是组织级的**，仓库用 `projectIds` 查询参数指定；`state` 只认小写 `opened`/`closed`/`merged`/`all`，写成大写会被忽略并返回全部。
+- **账号 id 的正则一开始太窄**（`[A-Za-z0-9._-]+`），Codeup 的显示名是邮箱，装不下操作者的 `lhbtata@163.com`。已放宽成 `[A-Za-z0-9._:@-]{1,120}`。
+- **插件重启 ≠ 进程重启**。面板保存只重启 `dsh-superagent` 这个插件（重新跑 setup），**不会重新 import 模块**，所以改了 `src/` 里的代码必须重启进程才生效：`systemctl --user restart dsh-superagent`。
+- **worker 会话和实例不在同一个 cgroup**：worker 跑在 `dsh-subprocess-<pid>-<hash>.scope`，实例在 `dsh-superagent.service`，所以重启实例不会连带杀掉正在跑的工单；但工单和 orchestrator 都在实例进程里，实例停掉期间 `orchestrator_report` 发不出去。
+
+### 14.4 切换后遗留
+
+- GitHub 靶场的 PR #4（`lhbtata/superagent-sandbox`）还没合并，部署没有指定合并用的 CLI，所以由人合并；切换后实例不再看 GitHub，那个工单不会因为合并而自动关闭，需要人工收尾。
+- 宿主没有 GitHub 写权限，`lhbtata/dsh-superagent-prototype` 上这批 Codeup 改动只落在本机工作区（分支 `feat/codeup-source`），推不上去。
+

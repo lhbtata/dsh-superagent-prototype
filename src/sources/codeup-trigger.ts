@@ -20,23 +20,37 @@ export type CodeupUser = z.infer<typeof CodeupUserSchema>
 /**
  * A Codeup change request, the merge request of a repository. Every field the Source reads is optional but the one
  * that identifies it, so a change request that arrives with fewer fields still parses.
+ *
+ * The list and the detail of a change request name the same things differently: the list answers `state` and
+ * `createdAt`, the detail answers `status` and `createTime`. The schema folds the detail's names into the list's, and
+ * lowercases the state, so that the rest of the Source reads one shape.
  */
 export const CodeupChangeRequestSchema = z.looseObject({
   localId: z.union([z.number(), z.string()]),
   title: z.string().nullish(),
   state: z.string().nullish(),
+  status: z.string().nullish(),
   detailUrl: z.string().nullish(),
   description: z.string().nullish(),
   createdAt: z.string().nullish(),
+  createTime: z.string().nullish(),
   updatedAt: z.string().nullish(),
+  updateTime: z.string().nullish(),
   mergedAt: z.string().nullish(),
   closedAt: z.string().nullish(),
   merged: z.boolean().nullish(),
+  totalCommentCount: z.number().nullish(),
+  unResolvedCommentCount: z.number().nullish(),
   projectId: z.union([z.string(), z.number()]).nullish(),
   sourceBranch: z.string().nullish(),
   targetBranch: z.string().nullish(),
   author: CodeupUserSchema.nullish(),
-})
+}).transform(request => ({
+  ...request,
+  state: (request.state ?? request.status)?.toLowerCase(),
+  createdAt: request.createdAt ?? request.createTime,
+  updatedAt: request.updatedAt ?? request.updateTime,
+}))
 export type CodeupChangeRequest = z.infer<typeof CodeupChangeRequestSchema>
 
 /** A comment on a Codeup change request, either on the change request itself or on a line of its diff. */
@@ -82,15 +96,40 @@ export const isHumanLogin = (user?: { username?: string | null | undefined; name
 export const mentions = (text: string, login: string): boolean =>
   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
 
-/** The account name of an author, falling back to the display name and then to an unknown author. */
-const loginOf = (user?: { username?: string | null | undefined; name?: string | null | undefined } | null): string =>
-  user?.username ?? user?.name ?? 'ghost'
+/** The names an account answers to: its display name and its platform login. */
+export const codeupAccountNames = (user?: { username?: string | null | undefined; name?: string | null | undefined } | null): string[] =>
+  [user?.name, user?.username].map(text => (text ?? '').trim()).filter(text => text !== '')
+
+/**
+ * The account name of an author, as the Policy's allowed list writes it: the display name first, because that is the
+ * name Codeup shows and the only name the agent's own account is known by; the platform login is the fallback.
+ */
+export const codeupAccountName = (user?: { username?: string | null | undefined; name?: string | null | undefined } | null): string =>
+  codeupAccountNames(user)[0] ?? 'ghost'
+
+/** True when the account is the one the agent acts as, whichever of its names the API answers with. */
+export const isAgentAccount = (user: { username?: string | null | undefined; name?: string | null | undefined } | null | undefined, agent: string): boolean =>
+  codeupAccountNames(user).some(name => sameName(name, agent))
 
 /** The actor of a trigger, and whether it is a person who is not the agent itself. */
 const author = (user: CodeupUser | null | undefined, agent: string) => ({
-  actor: { source: SOURCE, id: loginOf(user) },
-  human: isHumanLogin(user) && !sameName(loginOf(user), agent),
+  actor: { source: SOURCE, id: codeupAccountName(user) },
+  human: isHumanLogin(user) && !isAgentAccount(user, agent),
 })
+
+/**
+ * The text of a change request description. Codeup answers a rich text description as a JSON string that holds the
+ * markup in `htmlValue`; a plain description is used as it is.
+ */
+export function codeupDescription(request: { description?: string | null | undefined }): string {
+  const description = request.description ?? ''
+  if (!description.trim().startsWith('{')) return description
+  let html: unknown
+  try { html = (JSON.parse(description) as { htmlValue?: unknown }).htmlValue } catch { return description }
+  if (typeof html !== 'string') return description
+  return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ').trim()
+}
 
 /**
  * The Trigger of a change request opened in the watched repository. Its id names the change request only, so the same
@@ -98,7 +137,7 @@ const author = (user: CodeupUser | null | undefined, agent: string) => ({
  */
 export function changeRequestTrigger(request: CodeupChangeRequest, agent: string): Trigger {
   const localId = String(request.localId)
-  const text = [request.title ?? '', request.description ?? ''].filter(Boolean).join('\n\n')
+  const text = [request.title ?? '', codeupDescription(request)].filter(Boolean).join('\n\n')
   return {
     id: key('codeup-change-request', localId),
     source: SOURCE,
@@ -111,7 +150,7 @@ export function changeRequestTrigger(request: CodeupChangeRequest, agent: string
     meta: {
       localId,
       kind: 'changeRequest',
-      author: loginOf(request.author),
+      author: codeupAccountName(request.author),
       ...(request.sourceBranch ? { sourceBranch: request.sourceBranch } : {}),
       ...(request.targetBranch ? { targetBranch: request.targetBranch } : {}),
     },

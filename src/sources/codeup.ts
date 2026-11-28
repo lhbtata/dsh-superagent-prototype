@@ -1,12 +1,11 @@
 /** Codeup source kind definition, change request and comment polling loops, and Cordis plugin entry. */
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
-import { sameName } from '../infra/text.ts'
 import { family } from '../kv.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { cursorAt, pause, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
-import { changeRequestTrigger, commentTrigger, SOURCE, type CodeupChangeRequest } from './codeup-trigger.ts'
+import { changeRequestTrigger, commentTrigger, isAgentAccount, SOURCE, type CodeupChangeRequest } from './codeup-trigger.ts'
 import { codeupThreadContext, codeupIdentifiers, readChangeRequest, readChangeRequests, readComments } from './codeup-read.ts'
 import { changeRequestsOf, observeChangeRequest } from './codeup-pull.ts'
 import { codeupLink, codeupStatus, sendCodeup } from './codeup-channel.ts'
@@ -18,14 +17,19 @@ export const CodeupConfigSchema = z.object({
   pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeChangeRequests: z.boolean().default(true),
-  observeComments: z.boolean().default(true),
+  observeComments: z.boolean().default(false),
 }).strict()
 export type CodeupConfig = z.infer<typeof CodeupConfigSchema>
 
-/** The accounts the Policy admits, and the bot accounts it treats as candidates. */
+/**
+ * The accounts the Policy admits, and the bot accounts it treats as candidates. A Codeup account is named by its
+ * display name, which is often an email address, or by its platform login, which carries the `aliyun:` prefix; both
+ * forms are accepted.
+ */
+const CODEUP_ACCOUNT = /^[A-Za-z0-9._:@-]{1,120}$/
 const CodeupPolicySchema = z.object({
-  allowed: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9._-]+$/) }).strict()).default([]),
-  bots: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9._-]+$/) }).strict()).optional(),
+  allowed: z.array(z.object({ id: z.string().regex(CODEUP_ACCOUNT) }).strict()).default([]),
+  bots: z.array(z.object({ id: z.string().regex(CODEUP_ACCOUNT) }).strict()).optional(),
 }).strict()
 
 /** The rows of the Source, and the setting that opens each of them. */
@@ -88,7 +92,7 @@ export const codeupKind: SourceKind<CodeupConfig> = {
       key: 'observeComments',
       type: 'switch',
       label: { zh: '接收评论', en: 'Receive comments' },
-      hint: { zh: '打开后，变更请求上新建的评论也会收到。', en: 'New comments on the change requests are received too.' },
+      hint: { zh: '打开后，变更请求上新建的评论也会收到。云效的 OpenAPI 目前没有列出评论的读取接口，所以默认关闭；变更请求上的评论条数仍会读到。', en: 'New comments on the change requests are received too. Codeup’s OpenAPI lists no endpoint that reads the comments of a change request, so this is off by default; the number of comments is read all the same.' },
     },
   ],
   health: ['codeup'],
@@ -101,8 +105,8 @@ export const codeupKind: SourceKind<CodeupConfig> = {
   find: query => {
     const text = query.trim()
     const number = (/^#?(\d+)$/.exec(text)
-      ?? /codeup\.aliyun\.com\/[^/]+\/[^/]+\/mergeRequests\/(\d+)/.exec(text)
-      ?? /\/mergeRequests\/(\d+)/.exec(text))?.[1]
+      ?? /codeup\.aliyun\.com\/[^/]+\/[^/]+\/change\/(\d+)/.exec(text)
+      ?? /\/change\/(\d+)/.exec(text))?.[1]
     return { threads: number ? [`${SOURCE}:${number}`] : [], terms: [] }
   },
   policy: {
@@ -112,13 +116,13 @@ export const codeupKind: SourceKind<CodeupConfig> = {
         key: 'allowed',
         type: 'rows',
         label: { zh: '允许的账号', en: 'Allowed accounts' },
-        columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9._\\-]+' }],
+        columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9._:@-]+' }],
       },
       {
         key: 'bots',
         type: 'rows',
         label: { zh: '机器人账号', en: 'Bot accounts' },
-        columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9._\\-]+' }],
+        columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9._:@-]+' }],
       },
     ],
     explicit: {
@@ -222,7 +226,7 @@ async function pollChangeRequests(ctx: SourceContext, round: Round, config: Code
         const created = Date.parse(request.createdAt ?? '')
         if (Number.isFinite(created) && created < Date.parse(since)) continue
         // The change requests of the agent itself are its own work; they are not news to it.
-        if (sameName(request.author?.username ?? request.author?.name ?? '', login)) continue
+        if (isAgentAccount(request.author, login)) continue
         const trigger = changeRequestTrigger(request, login)
         if (trigger.text) await ctx.receive(trigger)
         round.count += 1
@@ -267,7 +271,7 @@ async function pollThreads(ctx: SourceContext, round: Round, config: CodeupConfi
         if (stopped(ctx, round)) throw new Error('The Codeup Source stopped during the poll')
         const at = Date.parse(comment.lastEditTime ?? comment.commentTime ?? '')
         if (Number.isFinite(at) && at < Date.parse(since)) continue
-        if (sameName(comment.author?.username ?? comment.author?.name ?? '', login)) continue
+        if (isAgentAccount(comment.author, login)) continue
         if (comment.deleted) continue
         const trigger = commentTrigger(comment, { localId }, login)
         if (trigger.text) await ctx.receive(trigger)

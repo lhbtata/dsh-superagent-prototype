@@ -1,15 +1,14 @@
 /** Codeup change request binding, lifecycle observation, and terminal IM notification helpers. */
 import { key, liveTicket, type OutboundMessage, type Ticket } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
-import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
-import { SOURCE, type CodeupChangeRequest } from './codeup-trigger.ts'
+import { codeupAccountName, isAgentAccount, SOURCE, type CodeupChangeRequest } from './codeup-trigger.ts'
 
 export { CodeupChangeRequestSchema, type CodeupChangeRequest } from './codeup-trigger.ts'
 
 /** The page of a change request, built from the repository the deployment works in. */
 export const codeupPage = (repository: string, localId: string | number): string =>
-  `https://codeup.aliyun.com/${repository}/mergeRequests/${localId}`
+  `https://codeup.aliyun.com/${repository}/change/${localId}`
 
 /** The number of a change request, read from the thread key that follows it. */
 const changeRequestNumber = (thread: string): string | undefined =>
@@ -31,8 +30,7 @@ export const agentChangeRequest = (
   request: Pick<CodeupChangeRequest, 'author' | 'projectId'>,
   deployment: Pick<Deployment, 'account' | 'repository' | 'codeup'>,
 ): boolean => {
-  const author = request.author?.username ?? request.author?.name ?? ''
-  if (!author || !sameName(author, deployment.account.login)) return false
+  if (!isAgentAccount(request.author, deployment.account.login)) return false
   const repositoryId = deployment.codeup?.repositoryId
   const projectId = request.projectId
   if (!repositoryId || projectId === undefined || projectId === null) return true
@@ -53,7 +51,7 @@ const bind = (ctx: SourceContext, ticketId: string, request: CodeupChangeRequest
       kind: 'changeRequest',
       url: request.detailUrl,
       title: request.title,
-      author: request.author?.username ?? request.author?.name,
+      author: codeupAccountName(request.author),
     })
   })
 }

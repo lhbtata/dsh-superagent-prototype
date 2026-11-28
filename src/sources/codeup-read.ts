@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import type { Commands, Tally } from '../infra/commands.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
-import { CodeupChangeRequestSchema, CodeupCommentSchema, isHumanLogin, type CodeupChangeRequest, type CodeupComment } from './codeup-trigger.ts'
+import { CodeupChangeRequestSchema, CodeupCommentSchema, codeupAccountName, codeupDescription, isHumanLogin, type CodeupChangeRequest, type CodeupComment } from './codeup-trigger.ts'
 import type { CodeupConfig } from './codeup.ts'
 
 /**
@@ -101,7 +101,7 @@ export function changeRequestSummary(request: CodeupChangeRequest): CodeupChange
     localId: String(request.localId),
     title: request.title ?? '',
     state: request.state ?? '',
-    author: request.author?.username ?? request.author?.name ?? '',
+    author: codeupAccountName(request.author),
     url: request.detailUrl ?? '',
     sourceBranch: request.sourceBranch ?? '',
     targetBranch: request.targetBranch ?? '',
@@ -115,7 +115,7 @@ export function codeupChangeRequestMessage(request: CodeupChangeRequest): Contex
     id: `changeRequest:${summary.localId}`,
     from: summary.author || 'ghost',
     at: request.createdAt ?? '',
-    text: [summary.title, request.description ?? ''].filter(Boolean).join('\n\n'),
+    text: [summary.title, codeupDescription(request)].filter(Boolean).join('\n\n'),
     ...(summary.url ? { url: summary.url } : {}),
   }
 }
@@ -125,7 +125,7 @@ export function codeupCommentMessage(comment: CodeupComment): ContextMessage {
   const author = comment.author ?? undefined
   return {
     id: String(comment.id),
-    from: author?.username ?? author?.name ?? 'ghost',
+    from: codeupAccountName(author),
     at: comment.commentTime ?? '',
     text: comment.body ?? '',
     ...(isHumanLogin(author) ? {} : { bot: true as const }),
@@ -146,34 +146,33 @@ export async function readCodeup(commands: Commands, resource: string): Promise<
     throw new Error('Use codeup/changeRequests/<number>, or append /comments for the comments of a change request')
   }
   const localId = matched[1]!
-  if (matched[2]) {
-    const comments = await readComments(commands, localId)
-    return { messages: comments.map(codeupCommentMessage), next_resource: undefined, skipped: 0 }
-  }
   const request = await readChangeRequest(commands, localId)
+  if (matched[2]) {
+    // Codeup's OpenAPI lists no endpoint that reads the comments of a change request (checked on 2026-11-28); the
+    // change request itself carries the number of comments, which is what the caller gets instead of the discussion.
+    const body = { ...changeRequestSummary(request), comments: request.totalCommentCount ?? 0,
+      unResolvedComments: request.unResolvedCommentCount ?? 0,
+      note: 'Codeup\'s OpenAPI has no endpoint that reads the comments of a change request; only their number is known.' }
+    return { messages: [codeupChangeRequestMessage(request)], body, skipped: 0 }
+  }
   return { messages: [codeupChangeRequestMessage(request)], body: changeRequestSummary(request), skipped: 0 }
 }
 
 /**
- * Context reader for a Codeup Trigger: it reads the conversation of the change request the Trigger belongs to, from the
- * comment the cursor names onwards.
+ * Context reader for a Codeup Trigger: it reads the change request the Trigger belongs to, with the number of
+ * comments on it.
  */
 export const codeupThreadContext: ThreadContext<CodeupConfig> = {
   messageId: trigger => trigger.url ?? '',
-  read: async (commands, trigger, part, cursor) => {
+  read: async (commands, trigger) => {
     const localId = trigger.meta.localId
     if (localId === undefined || localId === null) {
       return { messages: [], body: { status: 'no_change_request' }, status: 'no_change_request' }
     }
-    const comments = await readComments(commands, String(localId))
-    const since = Date.parse(cursor ?? '')
-    const read = comments.filter(comment => {
-      const at = Date.parse(comment.lastEditTime ?? comment.commentTime ?? '')
-      return !Number.isFinite(since) || !Number.isFinite(at) || at >= since
-    })
-    const messages = read.map(codeupCommentMessage)
-    const last = read.at(-1)
-    const next = last?.lastEditTime ?? last?.commentTime ?? undefined
-    return { messages, next, body: { status: 'change_request', localId: String(localId), messages } }
+    const request = await readChangeRequest(commands, String(localId))
+    const messages = [codeupChangeRequestMessage(request)]
+    const body = { status: 'change_request', localId: String(localId), messages,
+      comments: request.totalCommentCount ?? 0, unResolvedComments: request.unResolvedCommentCount ?? 0 }
+    return { messages, next: undefined, body }
   },
 }

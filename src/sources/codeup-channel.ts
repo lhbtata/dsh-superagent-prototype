@@ -5,15 +5,17 @@ import type { OutboundMessage } from '../core/index.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
 import type { SourceContext } from './host.ts'
 import { codeupCommands, codeupCommentsPath, codeupIdentifiers } from './codeup-read.ts'
-import { CodeupCommentSchema } from './codeup-trigger.ts'
 import { codeupPage } from './codeup-pull.ts'
 
 /**
- * The field the comment endpoint of a change request takes the text of the comment in. Codeup's OpenAPI names this
- * field `body`, but the endpoint still has to be checked against a live token; when it turns out to be named
- * differently, this constant is the only place to change.
+ * The fields the comment endpoint of a change request takes. Codeup's OpenAPI creates a comment with the text in
+ * `content` and the kind of comment in `comment_type` (checked against a live token on 2026-11-28); it has no field
+ * for the comment a reply answers, so a reply is a new comment on the change request.
  */
-export const CODEUP_COMMENT_BODY_FIELD = 'body'
+export const CODEUP_COMMENT_FIELDS = { content: 'content', type: 'comment_type' } as const
+
+/** The kind of comment the endpoint takes for a comment on the change request itself. */
+export const CODEUP_COMMENT_TYPE = 'GLOBAL_COMMENT'
 
 /**
  * The HTTP status a failure carries. The Codeup CLI reports errors as one line of JSON on stderr, and the error the
@@ -34,6 +36,9 @@ export const codeupStatus = (error: unknown): number | undefined => {
 /**
  * Posts the reply of the agent as a comment on the change request it belongs to. A change request that is gone makes
  * the reply a `gone`, every other failure is thrown so the caller can report it.
+ *
+ * Codeup's OpenAPI lists no endpoint that reads the comments of a change request, so a reply cannot be checked
+ * against the ones already there; the marker in its text tells a person which replies belong to the agent.
  */
 export async function sendCodeup(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const { commands } = host
@@ -43,15 +48,15 @@ export async function sendCodeup(host: Pick<SourceContext, 'commands'>, message:
   const path = codeupCommentsPath(organizationId, repositoryId, localId)
   const marker = `<!-- dsh-superagent:${message.id} -->`
   try {
-    const existing = await codeupCommands(commands).codeupPages(CodeupCommentSchema, path, [])
-    if (existing.some(comment => (comment.body ?? '').includes(marker))) return 'sent'
     await codeupCommands(commands).codeupApi(
       z.unknown(),
       path,
       '--method',
       'POST',
       '--field',
-      `${CODEUP_COMMENT_BODY_FIELD}=${message.text}\n\n${marker}`,
+      `${CODEUP_COMMENT_FIELDS.content}=${message.text}\n\n${marker}`,
+      '--field',
+      `${CODEUP_COMMENT_FIELDS.type}=${CODEUP_COMMENT_TYPE}`,
     )
     return 'sent'
   } catch (error) {
